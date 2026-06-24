@@ -1,0 +1,10 @@
+# Rust
+/target
+**/*.rs.bk
+
+# superpowers plans/specs/docs (kept local, not committed)
+.superpowers/
+docs/superpowers/
+
+# macOS
+.DS_Store
