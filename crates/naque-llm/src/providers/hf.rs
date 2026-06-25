@@ -1,6 +1,5 @@
-use crate::{LlmError, LlmRequest, LlmResponse};
-
 use super::openai::openai_chat_completion;
+use crate::{LlmError, LlmRequest, LlmResponse};
 
 pub struct HfProvider {
     api_key: String,
@@ -21,8 +20,7 @@ impl HfProvider {
     }
 
     pub fn from_env() -> Result<Self, LlmError> {
-        let key = std::env::var("HF_TOKEN")
-            .map_err(|_| LlmError::Provider("HF_TOKEN not set".to_string()))?;
+        let key = std::env::var("HF_TOKEN").map_err(|_| LlmError::Provider("HF_TOKEN not set".to_string()))?;
         Ok(Self::new(key, None))
     }
 }

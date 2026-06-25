@@ -124,9 +124,6 @@ docs = ["prod read replica"]
         assert_eq!(body.config.provider.as_deref(), Some("claude"));
         assert_eq!(body.config.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(body.config.mode.as_deref(), Some("readonly"));
-        assert_eq!(
-            body.docs.as_deref(),
-            Some(&["prod read replica".to_string()][..])
-        );
+        assert_eq!(body.docs.as_deref(), Some(&["prod read replica".to_string()][..]));
     }
 }

@@ -26,7 +26,7 @@ fn pg_url() -> Option<String> {
                  Set it to postgres://user:pass@host/db to run."
             );
             None
-        }
+        },
     }
 }
 
@@ -81,30 +81,15 @@ async fn test_postgres_introspect_tables_and_fk() {
         .expect("nq_orders table not found in introspection");
 
     // Schema should be "public"
-    assert_eq!(
-        nq_users.schema.as_deref(),
-        Some("public"),
-        "nq_users schema"
-    );
-    assert_eq!(
-        nq_orders.schema.as_deref(),
-        Some("public"),
-        "nq_orders schema"
-    );
+    assert_eq!(nq_users.schema.as_deref(), Some("public"), "nq_users schema");
+    assert_eq!(nq_orders.schema.as_deref(), Some("public"), "nq_orders schema");
 
     // nq_users.id should be PK
-    let id_col = nq_users
-        .columns
-        .iter()
-        .find(|c| c.name == "id")
-        .expect("nq_users.id column");
+    let id_col = nq_users.columns.iter().find(|c| c.name == "id").expect("nq_users.id column");
     assert!(id_col.primary_key, "nq_users.id should be PK");
 
     // nq_orders should have FK to nq_users
-    assert!(
-        !nq_orders.foreign_keys.is_empty(),
-        "nq_orders should have foreign keys"
-    );
+    assert!(!nq_orders.foreign_keys.is_empty(), "nq_orders should have foreign keys");
     let fk = nq_orders
         .foreign_keys
         .iter()
@@ -114,12 +99,8 @@ async fn test_postgres_introspect_tables_and_fk() {
     assert_eq!(fk.ref_columns, vec!["id"], "FK to column");
 
     // Cleanup
-    db.execute("DROP TABLE IF EXISTS nq_orders CASCADE")
-        .await
-        .ok();
-    db.execute("DROP TABLE IF EXISTS nq_users CASCADE")
-        .await
-        .ok();
+    db.execute("DROP TABLE IF EXISTS nq_orders CASCADE").await.ok();
+    db.execute("DROP TABLE IF EXISTS nq_users CASCADE").await.ok();
 }
 
 #[tokio::test]
@@ -136,27 +117,18 @@ async fn test_postgres_fingerprint_changes_after_alter() {
         .await
         .expect("create nq_fp_test");
 
-    let fp_before = current_fingerprint(&mut db)
-        .await
-        .expect("fingerprint before");
+    let fp_before = current_fingerprint(&mut db).await.expect("fingerprint before");
 
     db.execute("ALTER TABLE nq_fp_test ADD COLUMN email TEXT")
         .await
         .expect("alter table");
 
-    let fp_after = current_fingerprint(&mut db)
-        .await
-        .expect("fingerprint after");
+    let fp_after = current_fingerprint(&mut db).await.expect("fingerprint after");
 
-    assert_ne!(
-        fp_before, fp_after,
-        "fingerprint should change after ALTER TABLE ADD COLUMN"
-    );
+    assert_ne!(fp_before, fp_after, "fingerprint should change after ALTER TABLE ADD COLUMN");
 
     // Cleanup
-    db.execute("DROP TABLE IF EXISTS nq_fp_test CASCADE")
-        .await
-        .ok();
+    db.execute("DROP TABLE IF EXISTS nq_fp_test CASCADE").await.ok();
 }
 
 #[tokio::test]
@@ -176,11 +148,9 @@ async fn test_postgres_composite_foreign_key() {
     db.execute("CREATE TABLE nq_parent (a INT, b INT, PRIMARY KEY (a, b))")
         .await
         .expect("create nq_parent");
-    db.execute(
-        "CREATE TABLE nq_child (x INT, y INT, FOREIGN KEY (x, y) REFERENCES nq_parent(a, b))",
-    )
-    .await
-    .expect("create nq_child");
+    db.execute("CREATE TABLE nq_child (x INT, y INT, FOREIGN KEY (x, y) REFERENCES nq_parent(a, b))")
+        .await
+        .expect("create nq_child");
 
     let model = introspect(&mut db).await.expect("introspect");
 
@@ -197,23 +167,11 @@ async fn test_postgres_composite_foreign_key() {
         child.foreign_keys
     );
     let fk = &child.foreign_keys[0];
-    assert_eq!(
-        fk.columns,
-        vec!["x", "y"],
-        "composite FK source columns (no duplicates)"
-    );
+    assert_eq!(fk.columns, vec!["x", "y"], "composite FK source columns (no duplicates)");
     assert_eq!(fk.ref_table, "nq_parent", "composite FK ref table");
-    assert_eq!(
-        fk.ref_columns,
-        vec!["a", "b"],
-        "composite FK referenced columns (no duplicates)"
-    );
+    assert_eq!(fk.ref_columns, vec!["a", "b"], "composite FK referenced columns (no duplicates)");
 
     // Cleanup
-    db.execute("DROP TABLE IF EXISTS nq_child CASCADE")
-        .await
-        .ok();
-    db.execute("DROP TABLE IF EXISTS nq_parent CASCADE")
-        .await
-        .ok();
+    db.execute("DROP TABLE IF EXISTS nq_child CASCADE").await.ok();
+    db.execute("DROP TABLE IF EXISTS nq_parent CASCADE").await.ok();
 }

@@ -45,10 +45,8 @@ impl Agent {
     /// Appends the user message to memory, then loops:
     /// - Call the provider.
     /// - Append the assistant message to memory.
-    /// - If the response has tool calls, execute each one, append `ToolResult`
-    ///   messages, and repeat.
-    /// - Stop when there are no tool calls (final answer) or `max_iterations`
-    ///   is reached.
+    /// - If the response has tool calls, execute each one, append `ToolResult` messages, and repeat.
+    /// - Stop when there are no tool calls (final answer) or `max_iterations` is reached.
     ///
     /// `catalog` is a compact schema description that is appended to the system
     /// preamble for this turn only.
@@ -58,8 +56,7 @@ impl Agent {
         catalog: &str,
         executor: &mut dyn ToolExecutor,
     ) -> Result<TurnResult, LlmError> {
-        self.conversation
-            .push(Message::User(user_input.to_string()));
+        self.conversation.push(Message::User(user_input.to_string()));
 
         let system = format!("{}\n\n{}", self.config.system_preamble, catalog);
         let tools = standard_tools();
@@ -72,8 +69,7 @@ impl Agent {
         loop {
             if iterations >= self.config.max_iterations {
                 return Ok(TurnResult {
-                    answer: last_text
-                        .unwrap_or_else(|| "(stopped: reached max iterations)".to_string()),
+                    answer: last_text.unwrap_or_else(|| "(stopped: reached max iterations)".to_string()),
                     iterations,
                     tool_invocations,
                     usage,

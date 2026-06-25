@@ -98,15 +98,10 @@ async fn pg_readonly_enforcement() {
     assert_eq!(ok.rows.len(), 1);
 
     // A write on the readonly connection must be rejected by Postgres.
-    let err = db
-        .execute_readonly("INSERT INTO naque_test_ro_enforcement VALUES (99)")
-        .await;
-    assert!(
-        err.is_err(),
-        "INSERT on readonly connection must return Err, got: {err:?}"
-    );
+    let err = db.execute_readonly("INSERT INTO naque_test_ro_enforcement VALUES (99)").await;
+    assert!(err.is_err(), "INSERT on readonly connection must return Err, got: {err:?}");
     match err.unwrap_err() {
-        DbError::Query(_) => {} // Postgres rejected the write — expected
+        DbError::Query(_) => {}, // Postgres rejected the write — expected
         other => panic!("expected DbError::Query (write rejection), got: {other:?}"),
     }
 
@@ -135,44 +130,24 @@ async fn pg_session_persistence_and_reconnect_reset() {
         .expect("SET statement_timeout");
 
     // First fetch — same connection, session state should persist.
-    let r1 = db
-        .fetch("SHOW statement_timeout")
-        .await
-        .expect("SHOW after SET");
+    let r1 = db.fetch("SHOW statement_timeout").await.expect("SHOW after SET");
     assert_eq!(r1.rows.len(), 1);
-    let val1 = r1.rows[0][0]
-        .as_deref()
-        .expect("SHOW statement_timeout returned NULL");
-    assert!(
-        val1.contains("12345"),
-        "expected session GUC to be set to 12345ms, got: {val1}"
-    );
+    let val1 = r1.rows[0][0].as_deref().expect("SHOW statement_timeout returned NULL");
+    assert!(val1.contains("12345"), "expected session GUC to be set to 12345ms, got: {val1}");
 
     // Second fetch on same connection — still the same session value.
-    let r2 = db
-        .fetch("SHOW statement_timeout")
-        .await
-        .expect("SHOW second call");
-    assert_eq!(
-        r2.rows[0][0], r1.rows[0][0],
-        "session value must persist across calls"
-    );
+    let r2 = db.fetch("SHOW statement_timeout").await.expect("SHOW second call");
+    assert_eq!(r2.rows[0][0], r1.rows[0][0], "session value must persist across calls");
 
     // Reconnect drops and recreates the connection — GUC reverts to default.
     db.reconnect().await.expect("reconnect");
 
-    let r3 = db
-        .fetch("SHOW statement_timeout")
-        .await
-        .expect("SHOW after reconnect");
+    let r3 = db.fetch("SHOW statement_timeout").await.expect("SHOW after reconnect");
     assert_eq!(r3.rows.len(), 1);
     let val3 = r3.rows[0][0]
         .as_deref()
         .expect("SHOW statement_timeout returned NULL after reconnect");
-    assert!(
-        !val3.contains("12345"),
-        "statement_timeout should have reverted after reconnect, got: {val3}"
-    );
+    assert!(!val3.contains("12345"), "statement_timeout should have reverted after reconnect, got: {val3}");
 }
 
 // ---------------------------------------------------------------------------
@@ -252,27 +227,16 @@ async fn pg_type_stringification() {
 
     // TIMESTAMPTZ — just check it's non-empty and contains date fragments
     let ts = row[5].as_deref().expect("ts should be Some");
-    assert!(
-        ts.contains("2024") || ts.contains("15"),
-        "timestamptz should contain date info, got: {ts}"
-    );
+    assert!(ts.contains("2024") || ts.contains("15"), "timestamptz should contain date info, got: {ts}");
 
     // UUID
     let uid = row[6].as_deref().expect("uid should be Some");
-    assert!(
-        uid.contains("a0eebc99"),
-        "uuid should contain expected fragment, got: {uid}"
-    );
+    assert!(uid.contains("a0eebc99"), "uuid should contain expected fragment, got: {uid}");
 
     // JSONB
     let j = row[7].as_deref().expect("j should be Some");
-    assert!(
-        j.contains("key") || j.contains("value"),
-        "jsonb should contain key/value content, got: {j}"
-    );
+    assert!(j.contains("key") || j.contains("value"), "jsonb should contain key/value content, got: {j}");
 
     // Cleanup.
-    db.execute("DROP TABLE IF EXISTS naque_test_types")
-        .await
-        .expect("cleanup DROP");
+    db.execute("DROP TABLE IF EXISTS naque_test_types").await.expect("cleanup DROP");
 }

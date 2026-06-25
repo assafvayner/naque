@@ -1,22 +1,18 @@
 //! TUI rendering and terminal event loop.
 
-use anyhow::Context;
-use ratatui::{
-    backend::CrosstermBackend,
-    crossterm::{
-        event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-        ExecutableCommand,
-    },
-    layout::{Constraint, Direction, Layout, Rect},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame, Terminal,
-};
 use std::io;
 
+use anyhow::Context;
 use naque_core::gate::GateDecision;
 use naque_tui::{ApprovalChoice, ApprovalPrompt, ResultTable, StatusBar, Theme};
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::crossterm::ExecutableCommand;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::{Frame, Terminal};
 
 use crate::app::{App, TranscriptEntry};
 use crate::approval::{ApprovalDecision, Approver};
@@ -24,8 +20,7 @@ use crate::approval::{ApprovalDecision, Approver};
 /// Rough cost estimate for the default model (claude-opus-4-8):
 /// $5 per 1M input tokens, $25 per 1M output tokens.
 fn estimate_cost_usd(usage: &naque_llm::Usage) -> f64 {
-    (usage.input_tokens as f64 / 1_000_000.0) * 5.0
-        + (usage.output_tokens as f64 / 1_000_000.0) * 25.0
+    (usage.input_tokens as f64 / 1_000_000.0) * 5.0 + (usage.output_tokens as f64 / 1_000_000.0) * 25.0
 }
 
 // ---------------------------------------------------------------------------
@@ -40,13 +35,7 @@ fn estimate_cost_usd(usage: &naque_llm::Usage) -> f64 {
 /// 3. Approval prompt — overlaid when `pending` is Some.
 /// 4. Status bar — single line.
 /// 5. Input line — `> {input}`.
-pub fn render(
-    frame: &mut Frame,
-    app: &App,
-    theme: &Theme,
-    input: &str,
-    pending: Option<&ApprovalPrompt>,
-) {
+pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending: Option<&ApprovalPrompt>) {
     let size = frame.area();
 
     // Determine heights: input = 1, status = 1, result = up to 8 if present,
@@ -93,18 +82,13 @@ pub fn render(
             height: used,
         };
 
-        let para = Paragraph::new(tail)
-            .block(Block::default())
-            .wrap(Wrap { trim: false });
+        let para = Paragraph::new(tail).block(Block::default()).wrap(Wrap { trim: false });
         frame.render_widget(para, anchored);
     }
 
     // ---- Result table -------------------------------------------------------
     if let (Some(result), true) = (app.last_result(), has_result) {
-        let table = ResultTable::new(
-            result.columns.iter().map(|c| c.name.clone()).collect(),
-            result.rows.clone(),
-        );
+        let table = ResultTable::new(result.columns.iter().map(|c| c.name.clone()).collect(), result.rows.clone());
         let buf = frame.buffer_mut();
         table.render(theme, chunks[1], buf);
     }
@@ -142,9 +126,7 @@ pub fn render(
         let modal = centered_modal_rect(size, prompt);
         frame.render_widget(Clear, modal);
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Approval required ");
+        let block = Block::default().borders(Borders::ALL).title(" Approval required ");
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
 
@@ -176,12 +158,7 @@ fn centered_modal_rect(area: Rect, prompt: &ApprovalPrompt) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
 
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
+    Rect { x, y, width, height }
 }
 
 /// Build the styled transcript line(s) for one [`TranscriptEntry`].
@@ -193,26 +170,26 @@ fn transcript_lines<'a>(entry: &'a TranscriptEntry, theme: &Theme) -> Vec<Line<'
     match entry {
         TranscriptEntry::User(text) => {
             vec![Line::from(Span::raw(format!("you: {text}")))]
-        }
+        },
         TranscriptEntry::Agent(text) => {
             vec![Line::from(Span::raw(format!(" ai: {text}")))]
-        }
+        },
         TranscriptEntry::Sql { sql, label } => {
             vec![Line::from(vec![
                 Span::raw("sql["),
                 Span::styled(label.clone(), theme.label_style(label)),
                 Span::raw(format!("]: {sql}")),
             ])]
-        }
+        },
         TranscriptEntry::Info(text) => {
             vec![Line::from(Span::raw(format!("inf: {text}")))]
-        }
+        },
         TranscriptEntry::Error(text) => {
             vec![Line::from(Span::raw(format!("err: {text}")))]
-        }
+        },
         TranscriptEntry::Rejected(sql) => {
             vec![Line::from(Span::raw(format!("rej: {sql}")))]
-        }
+        },
     }
 }
 
@@ -240,12 +217,11 @@ impl<B: ratatui::backend::Backend + Send> Approver for TuiApprover<'_, B> {
                 // in the gate logic. We pass None for simplicity since the label
                 // already identifies the statement.
                 None
-            }
+            },
             _ => None,
         };
 
-        let mut prompt =
-            ApprovalPrompt::new(sql.to_string(), label.to_string(), catastrophic, decision);
+        let mut prompt = ApprovalPrompt::new(sql.to_string(), label.to_string(), catastrophic, decision);
 
         // Draw loop: render the frame with the pending prompt, wait for a key.
         loop {
@@ -254,9 +230,7 @@ impl<B: ratatui::backend::Backend + Send> Approver for TuiApprover<'_, B> {
                 let theme = self.theme;
                 let input = self.input;
                 let prompt_ref = &prompt;
-                let _ = self
-                    .terminal
-                    .draw(|f| render(f, app, theme, input, Some(prompt_ref)));
+                let _ = self.terminal.draw(|f| render(f, app, theme, input, Some(prompt_ref)));
             }
 
             // Read a key event (blocking).
@@ -279,7 +253,7 @@ impl<B: ratatui::backend::Backend + Send> Approver for TuiApprover<'_, B> {
                                 Some(edited) => ApprovalDecision::AcceptEdited(edited),
                                 None => ApprovalDecision::Reject,
                             }
-                        }
+                        },
                     };
                 }
             }
@@ -299,9 +273,7 @@ impl<B: ratatui::backend::Backend + Send> Approver for TuiApprover<'_, B> {
 pub fn run(mut app: App, theme: Theme, runtime: &tokio::runtime::Runtime) -> anyhow::Result<()> {
     // Enter raw mode and alternate screen.
     enable_raw_mode().context("enable raw mode")?;
-    io::stdout()
-        .execute(EnterAlternateScreen)
-        .context("enter alternate screen")?;
+    io::stdout().execute(EnterAlternateScreen).context("enter alternate screen")?;
 
     // RAII guard: from this point on, the terminal is ALWAYS restored on drop —
     // whether `run` returns early via `?`, completes normally, or unwinds on panic.
@@ -353,11 +325,10 @@ fn event_loop<B: ratatui::backend::Backend + Send>(
             }) if modifiers.contains(KeyModifiers::CONTROL) => {
                 // Ctrl-C → quit.
                 break;
-            }
+            },
 
             Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                ..
+                code: KeyCode::Enter, ..
             }) => {
                 let line = std::mem::take(&mut input_buf);
                 if line.trim().is_empty() {
@@ -397,23 +368,22 @@ fn event_loop<B: ratatui::backend::Backend + Send>(
                 if app.should_quit() {
                     break;
                 }
-            }
+            },
 
             Event::Key(KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             }) => {
                 input_buf.pop();
-            }
+            },
 
             Event::Key(KeyEvent {
-                code: KeyCode::Char(c),
-                ..
+                code: KeyCode::Char(c), ..
             }) => {
                 input_buf.push(c);
-            }
+            },
 
-            _ => {}
+            _ => {},
         }
     }
 
@@ -474,7 +444,7 @@ impl<B: ratatui::backend::Backend + Send> Approver for SnapshotApprover<'_, B> {
                                 Some(edited) => ApprovalDecision::AcceptEdited(edited),
                                 None => ApprovalDecision::Reject,
                             }
-                        }
+                        },
                     };
                 }
             }
@@ -521,19 +491,14 @@ fn render_snapshot(
     }
 
     // Input line.
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::raw(format!("> {input}")))),
-        chunks[2],
-    );
+    frame.render_widget(Paragraph::new(Line::from(Span::raw(format!("> {input}")))), chunks[2]);
 
     // Approval prompt — centered modal popup (drawn last, on top).
     if let Some(prompt) = pending {
         let modal = centered_modal_rect(size, prompt);
         frame.render_widget(Clear, modal);
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Approval required ");
+        let block = Block::default().borders(Borders::ALL).title(" Approval required ");
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
 
@@ -572,16 +537,16 @@ where
                         return None;
                     }
                     return Some(trimmed.to_string());
-                }
+                },
                 KeyCode::Esc => return None,
                 KeyCode::Backspace => {
                     buf.pop();
-                }
+                },
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return None;
-                }
+                },
                 KeyCode::Char(c) => buf.push(c),
-                _ => {}
+                _ => {},
             }
         }
     }
@@ -600,10 +565,7 @@ fn render_edit(frame: &mut Frame, app: &App, theme: &Theme, edit_buf: &str) {
         ])
         .split(size);
 
-    frame.render_widget(
-        Paragraph::new("editing query (Enter to run, Esc to cancel)"),
-        chunks[0],
-    );
+    frame.render_widget(Paragraph::new("editing query (Enter to run, Esc to cancel)"), chunks[0]);
 
     {
         let bar = StatusBar {
@@ -618,10 +580,7 @@ fn render_edit(frame: &mut Frame, app: &App, theme: &Theme, edit_buf: &str) {
     }
 
     frame.render_widget(Paragraph::new("edit SQL:"), chunks[2]);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::raw(format!("> {edit_buf}")))),
-        chunks[3],
-    );
+    frame.render_widget(Paragraph::new(Line::from(Span::raw(format!("> {edit_buf}")))), chunks[3]);
 }
 
 /// Render the edit-mode frame for the snapshot approver.
@@ -637,10 +596,7 @@ fn render_snapshot_edit(frame: &mut Frame, snap: &AppSnapshot, theme: &Theme, ed
         ])
         .split(size);
 
-    frame.render_widget(
-        Paragraph::new("editing query (Enter to run, Esc to cancel)"),
-        chunks[0],
-    );
+    frame.render_widget(Paragraph::new("editing query (Enter to run, Esc to cancel)"), chunks[0]);
 
     {
         let bar = StatusBar {
@@ -655,10 +611,7 @@ fn render_snapshot_edit(frame: &mut Frame, snap: &AppSnapshot, theme: &Theme, ed
     }
 
     frame.render_widget(Paragraph::new("edit SQL:"), chunks[2]);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::raw(format!("> {edit_buf}")))),
-        chunks[3],
-    );
+    frame.render_widget(Paragraph::new(Line::from(Span::raw(format!("> {edit_buf}")))), chunks[3]);
 }
 
 // ---------------------------------------------------------------------------
@@ -667,13 +620,14 @@ fn render_snapshot_edit(frame: &mut Frame, snap: &AppSnapshot, theme: &Theme, ed
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use naque_core::PermissionMode;
     use naque_llm::{AgentConfig, MockProvider};
     use naque_tui::ApprovalPrompt;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
     use tempfile::NamedTempFile;
 
+    use super::*;
     use crate::app::App;
     use crate::approval::AutoApprove;
 
@@ -690,14 +644,7 @@ mod tests {
                 system_preamble: "test".into(),
             },
         );
-        App::new(
-            db,
-            agent,
-            PermissionMode::Default,
-            "testprofile",
-            false,
-            100,
-        )
+        App::new(db, agent, PermissionMode::Default, "testprofile", false, 100)
     }
 
     fn buf_text(terminal: &Terminal<TestBackend>) -> String {
@@ -724,10 +671,7 @@ mod tests {
             output_tokens: 1_000_000,
         };
         let cost = estimate_cost_usd(&usage);
-        assert!(
-            (cost - 30.0).abs() < 1e-6,
-            "expected $30.00 for 1M+1M tokens, got {cost}"
-        );
+        assert!((cost - 30.0).abs() < 1e-6, "expected $30.00 for 1M+1M tokens, got {cost}");
     }
 
     #[tokio::test]
@@ -735,10 +679,8 @@ mod tests {
         let mut app = make_test_app().await;
 
         // Push transcript entries.
-        app.transcript
-            .push(TranscriptEntry::User("hello world".into()));
-        app.transcript
-            .push(TranscriptEntry::Agent("hi there".into()));
+        app.transcript.push(TranscriptEntry::User("hello world".into()));
+        app.transcript.push(TranscriptEntry::Agent("hi there".into()));
 
         // Set a result (fabricate a QueryResult).
         app.last_result = Some(naque_db::QueryResult {
@@ -754,27 +696,13 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal
-            .draw(|f| render(f, &app, &theme, "draft input", None))
-            .unwrap();
+        terminal.draw(|f| render(f, &app, &theme, "draft input", None)).unwrap();
 
         let text = buf_text(&terminal);
-        assert!(
-            text.contains("testprofile"),
-            "expected profile name in buffer:\n{text}"
-        );
-        assert!(
-            text.contains("hello world"),
-            "expected transcript substring in buffer:\n{text}"
-        );
-        assert!(
-            text.contains("42"),
-            "expected result cell value in buffer:\n{text}"
-        );
-        assert!(
-            text.contains("draft input"),
-            "expected input in buffer:\n{text}"
-        );
+        assert!(text.contains("testprofile"), "expected profile name in buffer:\n{text}");
+        assert!(text.contains("hello world"), "expected transcript substring in buffer:\n{text}");
+        assert!(text.contains("42"), "expected result cell value in buffer:\n{text}");
+        assert!(text.contains("draft input"), "expected input in buffer:\n{text}");
     }
 
     #[tokio::test]
@@ -782,29 +710,17 @@ mod tests {
         let app = make_test_app().await;
         let theme = Theme::new(false);
 
-        let prompt = ApprovalPrompt::new(
-            "DROP TABLE foo".into(),
-            "DDL: DROP".into(),
-            None,
-            naque_core::GateDecision::Prompt,
-        );
+        let prompt =
+            ApprovalPrompt::new("DROP TABLE foo".into(), "DDL: DROP".into(), None, naque_core::GateDecision::Prompt);
 
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal
-            .draw(|f| render(f, &app, &theme, "", Some(&prompt)))
-            .unwrap();
+        terminal.draw(|f| render(f, &app, &theme, "", Some(&prompt))).unwrap();
 
         let text = buf_text(&terminal);
-        assert!(
-            text.contains("DROP TABLE foo"),
-            "expected SQL in approval prompt:\n{text}"
-        );
-        assert!(
-            text.contains("Accept"),
-            "expected Accept option in approval prompt:\n{text}"
-        );
+        assert!(text.contains("DROP TABLE foo"), "expected SQL in approval prompt:\n{text}");
+        assert!(text.contains("Accept"), "expected Accept option in approval prompt:\n{text}");
     }
 
     #[tokio::test]
@@ -822,14 +738,7 @@ mod tests {
                 system_preamble: "test".into(),
             },
         );
-        let mut app = App::new(
-            db,
-            agent,
-            PermissionMode::Wildcard,
-            "testprofile",
-            false,
-            100,
-        );
+        let mut app = App::new(db, agent, PermissionMode::Wildcard, "testprofile", false, 100);
 
         // Seed data and run a query through the app.
         app.handle_line("!CREATE TABLE t(id INTEGER, val TEXT)", &mut AutoApprove)
@@ -838,23 +747,16 @@ mod tests {
         app.handle_line("!INSERT INTO t VALUES (1, 'hello')", &mut AutoApprove)
             .await
             .unwrap();
-        app.handle_line("!SELECT * FROM t", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!SELECT * FROM t", &mut AutoApprove).await.unwrap();
 
         let theme = Theme::new(false);
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal
-            .draw(|f| render(f, &app, &theme, "my query", None))
-            .unwrap();
+        terminal.draw(|f| render(f, &app, &theme, "my query", None)).unwrap();
 
         let text = buf_text(&terminal);
-        assert!(
-            text.contains("hello"),
-            "expected 'hello' in buffer:\n{text}"
-        );
+        assert!(text.contains("hello"), "expected 'hello' in buffer:\n{text}");
         assert!(text.contains("my query"), "expected input:\n{text}");
         drop(tmp);
     }

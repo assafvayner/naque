@@ -57,7 +57,7 @@ impl QueryToolExecutor<'_> {
         let sql = match self.db.engine() {
             naque_db::Engine::Sqlite => {
                 format!("PRAGMA table_info('{name}')")
-            }
+            },
             naque_db::Engine::Postgres => {
                 format!(
                     "SELECT column_name, data_type, is_nullable \
@@ -65,7 +65,7 @@ impl QueryToolExecutor<'_> {
                      WHERE table_name = '{name}' \
                      ORDER BY ordinal_position"
                 )
-            }
+            },
         };
 
         match self.db.fetch_readonly(&sql).await {
@@ -86,12 +86,7 @@ impl QueryToolExecutor<'_> {
             return Ok(format!("error: invalid table name {name:?}"));
         }
 
-        let limit = call
-            .input
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10)
-            .min(1000);
+        let limit = call.input.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).min(1000);
 
         let sql = format!("SELECT * FROM {name} LIMIT {limit}");
 
@@ -100,7 +95,7 @@ impl QueryToolExecutor<'_> {
                 let text = format_result_text(&result);
                 self.last_result = Some(result);
                 Ok(text)
-            }
+            },
             Err(e) => Ok(format!("error: {e}")),
         }
     }
@@ -127,21 +122,12 @@ impl QueryToolExecutor<'_> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| LlmError::Tool("run_query: missing 'sql'".to_string()))?;
 
-        match run_gated(
-            self.db,
-            self.mode,
-            self.catastrophic_guard,
-            sql,
-            QueryKind::Primary,
-            self.approver,
-        )
-        .await
-        {
+        match run_gated(self.db, self.mode, self.catastrophic_guard, sql, QueryKind::Primary, self.approver).await {
             Ok(result) => {
                 let text = format_result_text(&result);
                 self.last_result = Some(result);
                 Ok(text)
-            }
+            },
             Err(e) => Ok(e), // surface error to the agent as a string so it can self-correct
         }
     }
@@ -150,10 +136,7 @@ impl QueryToolExecutor<'_> {
 /// Returns `true` if `name` is safe to interpolate into a SQL identifier
 /// position. Allows letters, digits, underscores, dots, and double-quotes.
 fn is_safe_identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '"'))
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '"'))
 }
 
 /// Render a `QueryResult` to a compact text table for the agent to read.
@@ -231,9 +214,6 @@ mod tests {
             input: serde_json::json!({ "name": "t'; DROP TABLE t; --" }),
         };
         let out = exec.execute(&call).await.unwrap();
-        assert!(
-            out.starts_with("error: invalid table name"),
-            "expected rejection, got: {out}"
-        );
+        assert!(out.starts_with("error: invalid table name"), "expected rejection, got: {out}");
     }
 }

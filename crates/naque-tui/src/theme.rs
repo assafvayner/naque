@@ -84,9 +84,7 @@ impl Theme {
     pub fn mode_style(&self, mode: PermissionMode) -> Style {
         if self.color {
             match mode {
-                PermissionMode::Wildcard => {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                }
+                PermissionMode::Wildcard => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 PermissionMode::ReadOnly => Style::default().fg(Color::Green),
                 PermissionMode::Strict => Style::default().fg(Color::Cyan),
                 PermissionMode::Default => Style::default(),
@@ -122,8 +120,7 @@ impl Theme {
 fn classify_label(label: &str) -> (StatementKind, bool) {
     let lower = label.to_ascii_lowercase();
 
-    let catastrophic =
-        lower.contains("catastrophic") || lower.contains("drop") || lower.contains("truncate");
+    let catastrophic = lower.contains("catastrophic") || lower.contains("drop") || lower.contains("truncate");
 
     let kind = if lower.starts_with("read-only") || lower.starts_with("read only") {
         StatementKind::Read
@@ -155,10 +152,7 @@ mod tests {
 
     #[test]
     fn classify_label_write() {
-        assert_eq!(
-            classify_label("WRITE: UPDATE"),
-            (StatementKind::Write, false)
-        );
+        assert_eq!(classify_label("WRITE: UPDATE"), (StatementKind::Write, false));
     }
 
     #[test]
@@ -214,29 +208,20 @@ mod tests {
     #[test]
     fn write_with_color_has_fg() {
         let style = Theme::new(true).classification_style(StatementKind::Write, false);
-        assert!(
-            style.fg.is_some(),
-            "expected a foreground color when color=true"
-        );
+        assert!(style.fg.is_some(), "expected a foreground color when color=true");
     }
 
     #[test]
     fn write_without_color_has_no_fg() {
         let style = Theme::new(false).classification_style(StatementKind::Write, false);
-        assert!(
-            style.fg.is_none(),
-            "expected no foreground color when color=false"
-        );
+        assert!(style.fg.is_none(), "expected no foreground color when color=false");
     }
 
     #[test]
     fn catastrophic_with_color_has_fg_and_bold() {
         let style = Theme::new(true).classification_style(StatementKind::Ddl, true);
         assert!(style.fg.is_some());
-        assert!(
-            style.add_modifier.contains(Modifier::BOLD),
-            "catastrophic must include BOLD modifier"
-        );
+        assert!(style.add_modifier.contains(Modifier::BOLD), "catastrophic must include BOLD modifier");
     }
 
     #[test]
@@ -262,10 +247,7 @@ mod tests {
         let theme = Theme::new(true);
         let wildcard = theme.mode_style(PermissionMode::Wildcard);
         let default = theme.mode_style(PermissionMode::Default);
-        assert_ne!(
-            wildcard, default,
-            "wildcard and default must differ when color=true"
-        );
+        assert_ne!(wildcard, default, "wildcard and default must differ when color=true");
     }
 
     #[test]
@@ -290,11 +272,7 @@ mod tests {
             PermissionMode::Default,
         ] {
             let style = theme.mode_style(mode);
-            assert!(
-                style.fg.is_none(),
-                "mode {:?} should have no fg in no-color mode",
-                mode
-            );
+            assert!(style.fg.is_none(), "mode {:?} should have no fg in no-color mode", mode);
         }
     }
 
@@ -302,14 +280,8 @@ mod tests {
 
     #[test]
     fn selected_always_reversed() {
-        assert!(Theme::new(true)
-            .selected_style()
-            .add_modifier
-            .contains(Modifier::REVERSED));
-        assert!(Theme::new(false)
-            .selected_style()
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(Theme::new(true).selected_style().add_modifier.contains(Modifier::REVERSED));
+        assert!(Theme::new(false).selected_style().add_modifier.contains(Modifier::REVERSED));
     }
 
     // --- detect() ---

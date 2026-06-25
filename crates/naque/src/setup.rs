@@ -1,17 +1,15 @@
 //! Wires CLI args → profile resolution → App + Theme.
 
 use anyhow::{anyhow, Context};
+use naque::App;
 use naque_core::PermissionMode;
 use naque_db::Database;
-use naque_llm::{
-    Agent, AgentConfig, ClaudeProvider, GeminiProvider, HfProvider, OllamaProvider, OpenAIProvider,
-};
+use naque_llm::{Agent, AgentConfig, ClaudeProvider, GeminiProvider, HfProvider, OllamaProvider, OpenAIProvider};
 use naque_profile::{NaqueConfig, Overrides, Store, SystemSecrets};
 use naque_tui::Theme;
 
-use naque::App;
-
 use crate::cli::Args;
+use crate::help::NoConnection;
 
 /// System prompt injected into every agent turn.
 pub const SYSTEM_PREAMBLE: &str = "\
@@ -49,18 +47,12 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let resolved = naque_profile::resolve(&store, &current_dir, &overrides, &SystemSecrets)
         .context("profile resolution failed")?;
 
-    // 4. Require a connection URL.
-    let url = resolved.connection_url.ok_or_else(|| {
-        anyhow!(
-            "no database connection configured — set a profile, add naque.toml, \
-             use --url, or set DATABASE_URL"
-        )
-    })?;
+    // 4. Require a connection URL. The binary renders this into friendly guidance (bare launch) or a formatted error
+    //    (see `help`).
+    let url = resolved.connection_url.ok_or_else(|| NoConnection { bare: args.is_bare() })?;
 
     // 5. Connect to the database.
-    let db = Database::connect(&url)
-        .await
-        .context("database connection failed")?;
+    let db = Database::connect(&url).await.context("database connection failed")?;
 
     // 6. Permission mode.
     let mode = match resolved.config.mode.as_deref() {
@@ -72,42 +64,36 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let catastrophic_guard = !args.no_guard;
     let row_cap = resolved.config.row_cap.unwrap_or(1000) as usize;
 
-    // 7. Build provider. `config.provider` is filled by resolution either from
-    //    config/profile/CLI or by env-key auto-detection; `None` here means no
-    //    provider was configured and no known API key was found.
+    // 7. Build provider. `config.provider` is filled by resolution either from config/profile/CLI or by env-key
+    //    auto-detection; `None` here means no provider was configured and no known API key was found.
     let provider: Box<dyn naque_llm::LlmProvider> = match resolved.config.provider.as_deref() {
         Some("openai") => {
-            let p =
-                OpenAIProvider::from_env().map_err(|e| anyhow!("OpenAI provider error: {e}"))?;
+            let p = OpenAIProvider::from_env().map_err(|e| anyhow!("OpenAI provider error: {e}"))?;
             Box::new(p)
-        }
+        },
         Some("ollama") => Box::new(OllamaProvider::new(None)),
         Some("hf") | Some("huggingface") => {
             let p = HfProvider::from_env().map_err(|e| anyhow!("HF provider error: {e}"))?;
             Box::new(p)
-        }
+        },
         Some("gemini") | Some("google") => {
-            let p =
-                GeminiProvider::from_env().map_err(|e| anyhow!("Gemini provider error: {e}"))?;
+            let p = GeminiProvider::from_env().map_err(|e| anyhow!("Gemini provider error: {e}"))?;
             Box::new(p)
-        }
+        },
         Some("claude") | Some("anthropic") => {
-            let p =
-                ClaudeProvider::from_env().map_err(|e| anyhow!("Claude provider error: {e}"))?;
+            let p = ClaudeProvider::from_env().map_err(|e| anyhow!("Claude provider error: {e}"))?;
             Box::new(p)
-        }
+        },
         Some(other) => {
-            return Err(anyhow!(
-                "unknown provider {other:?}; expected one of: claude, openai, gemini, hf, ollama"
-            ))
-        }
+            return Err(anyhow!("unknown provider {other:?}; expected one of: claude, openai, gemini, hf, ollama"))
+        },
         None => {
             return Err(anyhow!(
                 "no AI provider configured and no known API key found — set one of \
                  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or HF_TOKEN, \
                  or set `provider` in your config/profile or pass --provider"
             ))
-        }
+        },
     };
 
     // 8. Model + agent config.
@@ -128,11 +114,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let agent = Agent::new(provider, agent_config);
 
     // 10. Profile name for the status bar.
-    let profile_name = resolved
-        .active_profile
-        .as_deref()
-        .unwrap_or("(none)")
-        .to_string();
+    let profile_name = resolved.active_profile.as_deref().unwrap_or("(none)").to_string();
 
     // 11. Construct App (schema loaded lazily via /learn).
     let app = App::new(db, agent, mode, profile_name, catastrophic_guard, row_cap);
@@ -166,22 +148,13 @@ mod tests {
 
     #[test]
     fn default_models_per_provider() {
-        assert_eq!(
-            default_model_for_provider(Some("claude")),
-            "claude-opus-4-8"
-        );
+        assert_eq!(default_model_for_provider(Some("claude")), "claude-opus-4-8");
         assert_eq!(default_model_for_provider(None), "claude-opus-4-8");
         assert_eq!(default_model_for_provider(Some("openai")), "gpt-4o");
-        assert_eq!(
-            default_model_for_provider(Some("gemini")),
-            "gemini-2.5-flash"
-        );
+        assert_eq!(default_model_for_provider(Some("gemini")), "gemini-2.5-flash");
         // HF default carries no `:provider` pin (auto backend selection).
         let hf = default_model_for_provider(Some("hf"));
         assert_eq!(hf, "zai-org/GLM-5.2");
-        assert!(
-            !hf.contains(':'),
-            "HF default must not pin a provider: {hf}"
-        );
+        assert!(!hf.contains(':'), "HF default must not pin a provider: {hf}");
     }
 }

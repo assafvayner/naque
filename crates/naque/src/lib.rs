@@ -7,7 +7,6 @@ pub mod ui;
 
 pub use app::{App, AppError, TranscriptEntry};
 pub use approval::{ApprovalDecision, Approver, AutoApprove, AutoReject, ScriptedApprover};
-
 use naque_core::gate::{gate_decision, GateDecision, QueryKind};
 use naque_core::PermissionMode;
 use naque_db::{Database, Engine, QueryResult};
@@ -55,19 +54,11 @@ pub async fn run_gated(
                 AD::AcceptEdited(new_sql) => {
                     // Recurse: re-classify and re-gate the edited SQL.
                     // This is a tail recursion via Box::pin to avoid stack overflow on deep edits.
-                    return Box::pin(run_gated(
-                        db,
-                        mode,
-                        catastrophic_guard,
-                        &new_sql,
-                        kind,
-                        approver,
-                    ))
-                    .await;
-                }
+                    return Box::pin(run_gated(db, mode, catastrophic_guard, &new_sql, kind, approver)).await;
+                },
                 AD::Reject => return Err("rejected".to_string()),
             }
-        }
+        },
     };
 
     // Re-classify the final SQL for routing (needed after AcceptEdited too, but
@@ -78,9 +69,7 @@ pub async fn run_gated(
 
     if kind == QueryKind::Introspection || (mode == PermissionMode::ReadOnly && read_only) {
         // DB-level read-only connection.
-        db.fetch_readonly(&final_sql)
-            .await
-            .map_err(|e| e.to_string())
+        db.fetch_readonly(&final_sql).await.map_err(|e| e.to_string())
     } else if read_only {
         // Read on primary connection.
         db.fetch(&final_sql).await.map_err(|e| e.to_string())

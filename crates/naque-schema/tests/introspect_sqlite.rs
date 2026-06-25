@@ -18,57 +18,30 @@ async fn test_sqlite_introspect_tables_and_columns() {
     db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
         .await
         .expect("create users");
-    db.execute(
-        "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), total REAL)",
-    )
-    .await
-    .expect("create orders");
+    db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), total REAL)")
+        .await
+        .expect("create orders");
 
     let model = introspect(&mut db).await.expect("introspect");
 
     assert_eq!(model.engine, "sqlite");
 
     let table_names: Vec<&str> = model.tables.iter().map(|t| t.name.as_str()).collect();
-    assert!(
-        table_names.contains(&"users"),
-        "should contain users, got: {table_names:?}"
-    );
-    assert!(
-        table_names.contains(&"orders"),
-        "should contain orders, got: {table_names:?}"
-    );
+    assert!(table_names.contains(&"users"), "should contain users, got: {table_names:?}");
+    assert!(table_names.contains(&"orders"), "should contain orders, got: {table_names:?}");
 
     // users.id is PK
-    let users = model
-        .tables
-        .iter()
-        .find(|t| t.name == "users")
-        .expect("users table");
-    let id_col = users
-        .columns
-        .iter()
-        .find(|c| c.name == "id")
-        .expect("id column");
+    let users = model.tables.iter().find(|t| t.name == "users").expect("users table");
+    let id_col = users.columns.iter().find(|c| c.name == "id").expect("id column");
     assert!(id_col.primary_key, "users.id should be PK");
 
     // users.name is NOT NULL
-    let name_col = users
-        .columns
-        .iter()
-        .find(|c| c.name == "name")
-        .expect("name column");
+    let name_col = users.columns.iter().find(|c| c.name == "name").expect("name column");
     assert!(!name_col.nullable, "users.name should be NOT NULL");
 
     // orders has FK to users
-    let orders = model
-        .tables
-        .iter()
-        .find(|t| t.name == "orders")
-        .expect("orders table");
-    assert!(
-        !orders.foreign_keys.is_empty(),
-        "orders should have foreign keys"
-    );
+    let orders = model.tables.iter().find(|t| t.name == "orders").expect("orders table");
+    assert!(!orders.foreign_keys.is_empty(), "orders should have foreign keys");
     let fk = orders
         .foreign_keys
         .iter()
@@ -85,15 +58,11 @@ async fn test_sqlite_fingerprint_changes_after_alter() {
     db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
         .await
         .expect("create users");
-    db.execute(
-        "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), total REAL)",
-    )
-    .await
-    .expect("create orders");
-
-    let fp_before = current_fingerprint(&mut db)
+    db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), total REAL)")
         .await
-        .expect("fingerprint before");
+        .expect("create orders");
+
+    let fp_before = current_fingerprint(&mut db).await.expect("fingerprint before");
 
     // SQLite doesn't support adding columns via ALTER easily on all versions,
     // but this should be fine for testing.
@@ -101,14 +70,9 @@ async fn test_sqlite_fingerprint_changes_after_alter() {
         .await
         .expect("alter table");
 
-    let fp_after = current_fingerprint(&mut db)
-        .await
-        .expect("fingerprint after");
+    let fp_after = current_fingerprint(&mut db).await.expect("fingerprint after");
 
-    assert_ne!(
-        fp_before, fp_after,
-        "fingerprint should change after ALTER TABLE ADD COLUMN"
-    );
+    assert_ne!(fp_before, fp_after, "fingerprint should change after ALTER TABLE ADD COLUMN");
 }
 
 #[tokio::test]
@@ -118,32 +82,17 @@ async fn test_sqlite_composite_foreign_key() {
     db.execute("CREATE TABLE parent (a INTEGER, b INTEGER, PRIMARY KEY (a, b))")
         .await
         .expect("create parent");
-    db.execute(
-        "CREATE TABLE child (x INTEGER, y INTEGER, FOREIGN KEY (x, y) REFERENCES parent(a, b))",
-    )
-    .await
-    .expect("create child");
+    db.execute("CREATE TABLE child (x INTEGER, y INTEGER, FOREIGN KEY (x, y) REFERENCES parent(a, b))")
+        .await
+        .expect("create child");
 
     let model = introspect(&mut db).await.expect("introspect");
 
-    let child = model
-        .tables
-        .iter()
-        .find(|t| t.name == "child")
-        .expect("child table");
+    let child = model.tables.iter().find(|t| t.name == "child").expect("child table");
 
-    assert_eq!(
-        child.foreign_keys.len(),
-        1,
-        "child should have exactly one FK, got: {:?}",
-        child.foreign_keys
-    );
+    assert_eq!(child.foreign_keys.len(), 1, "child should have exactly one FK, got: {:?}", child.foreign_keys);
     let fk = &child.foreign_keys[0];
     assert_eq!(fk.columns, vec!["x", "y"], "composite FK source columns");
     assert_eq!(fk.ref_table, "parent", "composite FK ref table");
-    assert_eq!(
-        fk.ref_columns,
-        vec!["a", "b"],
-        "composite FK referenced columns"
-    );
+    assert_eq!(fk.ref_columns, vec!["a", "b"], "composite FK referenced columns");
 }

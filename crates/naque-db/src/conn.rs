@@ -26,19 +26,13 @@ impl Conn {
     pub(crate) async fn execute(&mut self, sql: &str) -> Result<u64, DbError> {
         match self {
             Conn::Pg(c) => {
-                let result = c
-                    .execute(sql)
-                    .await
-                    .map_err(|e| DbError::Query(e.to_string()))?;
+                let result = c.execute(sql).await.map_err(|e| DbError::Query(e.to_string()))?;
                 Ok(result.rows_affected())
-            }
+            },
             Conn::Sqlite(c) => {
-                let result = c
-                    .execute(sql)
-                    .await
-                    .map_err(|e| DbError::Query(e.to_string()))?;
+                let result = c.execute(sql).await.map_err(|e| DbError::Query(e.to_string()))?;
                 Ok(result.rows_affected())
-            }
+            },
         }
     }
 }
@@ -106,15 +100,7 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
     // Integer types
     if matches!(
         tn.as_str(),
-        "int8"
-            | "bigint"
-            | "int"
-            | "integer"
-            | "int4"
-            | "int2"
-            | "smallint"
-            | "serial"
-            | "bigserial"
+        "int8" | "bigint" | "int" | "integer" | "int4" | "int2" | "smallint" | "serial" | "bigserial"
     ) {
         if let Ok(v) = row.try_get::<i64, _>(i) {
             return Some(v.to_string());
@@ -128,10 +114,7 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
     }
 
     // Float types
-    if matches!(
-        tn.as_str(),
-        "float8" | "double precision" | "float4" | "real" | "numeric" | "decimal"
-    ) {
+    if matches!(tn.as_str(), "float8" | "double precision" | "float4" | "real" | "numeric" | "decimal") {
         if let Ok(v) = row.try_get::<f64, _>(i) {
             return Some(v.to_string());
         }
@@ -173,8 +156,7 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
         if let Ok(v) = row.try_get::<sqlx::types::chrono::NaiveDateTime, _>(i) {
             return Some(v.to_string());
         }
-        if let Ok(v) = row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(i)
-        {
+        if let Ok(v) = row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(i) {
             return Some(v.to_string());
         }
     }

@@ -47,18 +47,12 @@ mod tests {
 
     #[test]
     fn raw_sql_prefix() {
-        assert_eq!(
-            route_input("!SELECT 1"),
-            Input::RawSql("SELECT 1".to_string())
-        );
+        assert_eq!(route_input("!SELECT 1"), Input::RawSql("SELECT 1".to_string()));
     }
 
     #[test]
     fn raw_sql_with_surrounding_spaces() {
-        assert_eq!(
-            route_input("  !  SELECT 1  "),
-            Input::RawSql("SELECT 1".to_string())
-        );
+        assert_eq!(route_input("  !  SELECT 1  "), Input::RawSql("SELECT 1".to_string()));
     }
 
     #[test]
@@ -68,10 +62,7 @@ mod tests {
 
     #[test]
     fn db_command_with_surrounding_spaces() {
-        assert_eq!(
-            route_input("  \\d users  "),
-            Input::DbCommand("d users".to_string())
-        );
+        assert_eq!(route_input("  \\d users  "), Input::DbCommand("d users".to_string()));
     }
 
     #[test]
@@ -81,35 +72,23 @@ mod tests {
 
     #[test]
     fn natural_language_line() {
-        assert_eq!(
-            route_input("show me all users"),
-            Input::NaturalLanguage("show me all users".to_string())
-        );
+        assert_eq!(route_input("show me all users"), Input::NaturalLanguage("show me all users".to_string()));
     }
 
     #[test]
     fn line_containing_prefix_char_but_not_starting_with_it_is_nl() {
         // The '!' is not the first char — should be NaturalLanguage.
-        assert_eq!(
-            route_input("hello! world"),
-            Input::NaturalLanguage("hello! world".to_string())
-        );
+        assert_eq!(route_input("hello! world"), Input::NaturalLanguage("hello! world".to_string()));
     }
 
     #[test]
     fn line_containing_slash_not_leading_is_nl() {
-        assert_eq!(
-            route_input("path/to/something"),
-            Input::NaturalLanguage("path/to/something".to_string())
-        );
+        assert_eq!(route_input("path/to/something"), Input::NaturalLanguage("path/to/something".to_string()));
     }
 
     #[test]
     fn line_containing_backslash_not_leading_is_nl() {
-        assert_eq!(
-            route_input("C:\\Users\\foo"),
-            Input::NaturalLanguage("C:\\Users\\foo".to_string())
-        );
+        assert_eq!(route_input("C:\\Users\\foo"), Input::NaturalLanguage("C:\\Users\\foo".to_string()));
     }
 
     #[test]
@@ -121,9 +100,6 @@ mod tests {
 
     #[test]
     fn leading_whitespace_then_prefix() {
-        assert_eq!(
-            route_input("   /status"),
-            Input::ToolCommand("status".to_string())
-        );
+        assert_eq!(route_input("   /status"), Input::ToolCommand("status".to_string()));
     }
 }

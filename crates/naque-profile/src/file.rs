@@ -41,7 +41,7 @@ impl NaqueFile {
             (Some(mut base), Some(over)) => {
                 base.extend(over);
                 Some(base)
-            }
+            },
             (Some(base), None) => Some(base),
             (None, over) => over,
         };
@@ -100,10 +100,7 @@ password_keyring = "naque-local"
         assert_eq!(prod.connection.engine, Some(ProfileEngine::Postgres));
         assert_eq!(prod.connection.host.as_deref(), Some("db.example.com"));
         assert_eq!(prod.connection.user.as_deref(), Some("analyst"));
-        assert_eq!(
-            prod.connection.password_env.as_deref(),
-            Some("PROD_DB_PASSWORD")
-        );
+        assert_eq!(prod.connection.password_env.as_deref(), Some("PROD_DB_PASSWORD"));
         let docs = prod.docs.as_ref().unwrap();
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0], "Production database — read-only analyst role.");
@@ -113,10 +110,7 @@ password_keyring = "naque-local"
         let local = profiles.get("local").unwrap();
         assert_eq!(local.connection.engine, Some(ProfileEngine::Sqlite));
         assert_eq!(local.connection.path.as_deref(), Some("/tmp/local.db"));
-        assert_eq!(
-            local.connection.password_keyring.as_deref(),
-            Some("naque-local")
-        );
+        assert_eq!(local.connection.password_keyring.as_deref(), Some("naque-local"));
     }
 
     #[test]

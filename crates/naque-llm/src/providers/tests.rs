@@ -1,11 +1,10 @@
 use serde_json::{json, Value};
 
-use crate::{
-    ClaudeProvider, GeminiProvider, HfProvider, LlmProvider, LlmRequest, Message, OllamaProvider,
-    OpenAIProvider, ToolCall, ToolDef,
-};
-
 use super::openai::{openai_build_body, openai_parse_response};
+use crate::{
+    ClaudeProvider, GeminiProvider, HfProvider, LlmProvider, LlmRequest, Message, OllamaProvider, OpenAIProvider,
+    ToolCall, ToolDef,
+};
 
 fn make_request() -> LlmRequest {
     LlmRequest {
@@ -56,10 +55,7 @@ fn claude_build_body_maps_messages_and_tools() {
     assert_eq!(body["model"], "test-model");
     assert_eq!(body["max_tokens"], 1024);
     assert_eq!(body["system"], "You are a test assistant.");
-    assert!(
-        body.get("thinking").is_none(),
-        "must not send thinking field"
-    );
+    assert!(body.get("thinking").is_none(), "must not send thinking field");
 
     // Tools
     let tool = &body["tools"][0];
@@ -124,10 +120,7 @@ fn claude_parse_response_text_and_tools() {
     assert_eq!(resp.tool_calls.len(), 1);
     assert_eq!(resp.tool_calls[0].id, "toolu_01");
     assert_eq!(resp.tool_calls[0].name, "run_query");
-    assert_eq!(
-        resp.tool_calls[0].input["sql"],
-        "SELECT COUNT(*) FROM users"
-    );
+    assert_eq!(resp.tool_calls[0].input["sql"], "SELECT COUNT(*) FROM users");
 }
 
 #[test]
@@ -401,7 +394,7 @@ async fn hf_live_tool_call() {
         Err(_) => {
             eprintln!("[skip] HF_TOKEN not set — skipping live HF test");
             return;
-        }
+        },
     };
 
     let provider = HfProvider::new(key, None);
@@ -449,7 +442,7 @@ async fn live_claude_say_hi() {
         Err(_) => {
             eprintln!("[skip] ANTHROPIC_API_KEY not set — skipping live Claude test");
             return;
-        }
+        },
     };
 
     let provider = ClaudeProvider::new(key, None);

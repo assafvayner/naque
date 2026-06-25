@@ -6,8 +6,7 @@ use naque_db::{Database, Engine, QueryResult};
 use naque_llm::{Agent, Usage};
 use naque_schema::SchemaModel;
 use naque_sql::{classify, SqlDialect};
-use naque_tui::route_input;
-use naque_tui::Input;
+use naque_tui::{route_input, Input};
 
 use crate::approval::Approver;
 use crate::executor::{format_result_text, QueryToolExecutor};
@@ -134,16 +133,7 @@ impl App {
         kind: QueryKind,
         approver: &mut dyn Approver,
     ) -> Result<QueryResult, AppError> {
-        match run_gated(
-            &mut self.db,
-            self.mode,
-            self.catastrophic_guard,
-            sql,
-            kind,
-            approver,
-        )
-        .await
-        {
+        match run_gated(&mut self.db, self.mode, self.catastrophic_guard, sql, kind, approver).await {
             Ok(result) => {
                 // Build a label from the classification for the transcript.
                 let dialect = engine_dialect(self.db.engine());
@@ -166,36 +156,26 @@ impl App {
                     label,
                 });
                 Ok(result)
-            }
+            },
             Err(msg) => {
                 if msg == "rejected" {
-                    self.transcript
-                        .push(TranscriptEntry::Rejected(sql.to_string()));
+                    self.transcript.push(TranscriptEntry::Rejected(sql.to_string()));
                     Err(AppError::Rejected)
                 } else {
                     self.transcript.push(TranscriptEntry::Error(msg.clone()));
                     Err(AppError::Other(msg))
                 }
-            }
+            },
         }
     }
 
     // --- Natural language --------------------------------------------------
 
-    pub async fn handle_natural_language(
-        &mut self,
-        text: &str,
-        approver: &mut dyn Approver,
-    ) -> Result<(), AppError> {
-        self.transcript
-            .push(TranscriptEntry::User(text.to_string()));
+    pub async fn handle_natural_language(&mut self, text: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
+        self.transcript.push(TranscriptEntry::User(text.to_string()));
 
         // Compute the catalog before splitting borrows.
-        let catalog = self
-            .schema
-            .as_ref()
-            .map(|s| s.compact_catalog())
-            .unwrap_or_default();
+        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
 
         // Destructure to satisfy the borrow checker: we need both
         // `self.agent` (exclusive borrow for run_turn) and `self.db` (passed
@@ -245,21 +225,17 @@ impl App {
 
         if cmd == "reset" {
             self.db.reconnect().await?;
-            self.transcript
-                .push(TranscriptEntry::Info("reconnected".to_string()));
+            self.transcript.push(TranscriptEntry::Info("reconnected".to_string()));
             return Ok(());
         }
 
         if cmd == "dt" {
             if let Some(schema) = &self.schema {
                 let names: Vec<String> = schema.tables.iter().map(|t| t.name.clone()).collect();
-                self.transcript.push(TranscriptEntry::Info(format!(
-                    "tables: {}",
-                    names.join(", ")
-                )));
+                self.transcript
+                    .push(TranscriptEntry::Info(format!("tables: {}", names.join(", "))));
                 // Also set last_result so callers can inspect it.
-                let rows: Vec<Vec<Option<String>>> =
-                    names.iter().map(|n| vec![Some(n.clone())]).collect();
+                let rows: Vec<Vec<Option<String>>> = names.iter().map(|n| vec![Some(n.clone())]).collect();
                 self.last_result = Some(QueryResult {
                     columns: vec![naque_db::Column {
                         name: "table_name".to_string(),
@@ -271,23 +247,21 @@ impl App {
             } else {
                 // Live introspect.
                 let sql = match self.db.engine() {
-                    Engine::Sqlite => {
-                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-                    }
+                    Engine::Sqlite => "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
                     Engine::Postgres => {
                         "SELECT table_name FROM information_schema.tables \
                          WHERE table_schema = 'public' ORDER BY table_name"
-                    }
+                    },
                 };
                 match self.db.fetch_readonly(sql).await {
                     Ok(result) => {
                         let text = format_result_text(&result);
                         self.transcript.push(TranscriptEntry::Info(text));
                         self.last_result = Some(result);
-                    }
+                    },
                     Err(e) => {
                         self.transcript.push(TranscriptEntry::Error(e.to_string()));
-                    }
+                    },
                 }
             }
             return Ok(());
@@ -299,20 +273,17 @@ impl App {
                 if let Some(description) = schema.describe_table(table) {
                     self.transcript.push(TranscriptEntry::Info(description));
                 } else {
-                    self.transcript
-                        .push(TranscriptEntry::Info(format!("table not found: {table}")));
+                    self.transcript.push(TranscriptEntry::Info(format!("table not found: {table}")));
                 }
             } else {
-                self.transcript.push(TranscriptEntry::Info(
-                    "schema not learned yet; run /learn".to_string(),
-                ));
+                self.transcript
+                    .push(TranscriptEntry::Info("schema not learned yet; run /learn".to_string()));
             }
             return Ok(());
         }
 
         if let Some(rest) = cmd.strip_prefix("set ") {
-            self.transcript
-                .push(TranscriptEntry::Info(format!("set {rest}")));
+            self.transcript.push(TranscriptEntry::Info(format!("set {rest}")));
             return Ok(());
         }
 
@@ -321,32 +292,25 @@ impl App {
         Ok(())
     }
 
-    pub async fn handle_tool_command(
-        &mut self,
-        cmd: &str,
-        approver: &mut dyn Approver,
-    ) -> Result<(), AppError> {
+    pub async fn handle_tool_command(&mut self, cmd: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
         let cmd = cmd.trim();
 
         if let Some(rest) = cmd.strip_prefix("mode ") {
             match rest.trim().parse::<PermissionMode>() {
                 Ok(m) => {
                     self.mode = m;
-                    self.transcript
-                        .push(TranscriptEntry::Info(format!("mode set to {m}")));
-                }
+                    self.transcript.push(TranscriptEntry::Info(format!("mode set to {m}")));
+                },
                 Err(e) => {
-                    self.transcript
-                        .push(TranscriptEntry::Info(format!("unknown mode: {e}")));
-                }
+                    self.transcript.push(TranscriptEntry::Info(format!("unknown mode: {e}")));
+                },
             }
             return Ok(());
         }
 
         if cmd == "clear" {
             self.agent.clear();
-            self.transcript
-                .push(TranscriptEntry::Info("agent memory cleared".to_string()));
+            self.transcript.push(TranscriptEntry::Info("agent memory cleared".to_string()));
             return Ok(());
         }
 
@@ -355,13 +319,11 @@ impl App {
                 Ok(model) => {
                     let count = model.tables.len();
                     self.schema = Some(model);
-                    self.transcript
-                        .push(TranscriptEntry::Info(format!("learned {count} table(s)")));
-                }
+                    self.transcript.push(TranscriptEntry::Info(format!("learned {count} table(s)")));
+                },
                 Err(e) => {
-                    self.transcript
-                        .push(TranscriptEntry::Error(format!("learn failed: {e}")));
-                }
+                    self.transcript.push(TranscriptEntry::Error(format!("learn failed: {e}")));
+                },
             }
             return Ok(());
         }
@@ -384,13 +346,11 @@ impl App {
                             result.rows.clone(),
                         );
                         let csv = table.to_csv();
-                        self.transcript
-                            .push(TranscriptEntry::Info(format!("--- CSV ---\n{csv}")));
+                        self.transcript.push(TranscriptEntry::Info(format!("--- CSV ---\n{csv}")));
                     } else {
-                        self.transcript
-                            .push(TranscriptEntry::Info("no result to export".to_string()));
+                        self.transcript.push(TranscriptEntry::Info("no result to export".to_string()));
                     }
-                }
+                },
                 "json" => {
                     if let Some(result) = &self.last_result {
                         let table = naque_tui::ResultTable::new(
@@ -398,18 +358,15 @@ impl App {
                             result.rows.clone(),
                         );
                         let json = table.to_json();
-                        self.transcript
-                            .push(TranscriptEntry::Info(format!("--- JSON ---\n{json}")));
+                        self.transcript.push(TranscriptEntry::Info(format!("--- JSON ---\n{json}")));
                     } else {
-                        self.transcript
-                            .push(TranscriptEntry::Info("no result to export".to_string()));
+                        self.transcript.push(TranscriptEntry::Info("no result to export".to_string()));
                     }
-                }
+                },
                 fmt => {
-                    self.transcript.push(TranscriptEntry::Info(format!(
-                        "unknown export format: {fmt}"
-                    )));
-                }
+                    self.transcript
+                        .push(TranscriptEntry::Info(format!("unknown export format: {fmt}")));
+                },
             }
             return Ok(());
         }
@@ -422,34 +379,29 @@ impl App {
         // Silence the unused parameter warning in the non-NL paths.
         let _ = approver;
 
-        self.transcript.push(TranscriptEntry::Info(format!(
-            "unknown tool command: {cmd}"
-        )));
+        self.transcript
+            .push(TranscriptEntry::Info(format!("unknown tool command: {cmd}")));
         Ok(())
     }
 
     /// Route a raw input line and dispatch to the appropriate handler.
-    pub async fn handle_line(
-        &mut self,
-        line: &str,
-        approver: &mut dyn Approver,
-    ) -> Result<(), AppError> {
+    pub async fn handle_line(&mut self, line: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
         match route_input(line) {
             Input::NaturalLanguage(text) => {
                 self.handle_natural_language(&text, approver).await?;
-            }
+            },
             Input::RawSql(sql) => {
                 // `execute_sql` already records the outcome (Sql / Rejected / Error)
                 // in the transcript; don't double-record it here.
                 let _ = self.execute_sql(&sql, QueryKind::Primary, approver).await;
-            }
+            },
             Input::DbCommand(cmd) => {
                 self.handle_db_command(&cmd).await?;
-            }
+            },
             Input::ToolCommand(cmd) => {
                 self.handle_tool_command(&cmd, approver).await?;
-            }
-            Input::Empty => {}
+            },
+            Input::Empty => {},
         }
         Ok(())
     }
@@ -472,9 +424,9 @@ fn engine_dialect(engine: Engine) -> SqlDialect {
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
     use naque_llm::{AgentConfig, LlmResponse, MockProvider, ToolCall, Usage as LlmUsage};
 
+    use super::*;
     use crate::approval::{AutoApprove, AutoReject, ScriptedApprover};
     use crate::ApprovalDecision;
 
@@ -529,9 +481,7 @@ pub mod tests {
             .await
             .unwrap();
 
-        app.handle_line("!SELECT * FROM t", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!SELECT * FROM t", &mut AutoApprove).await.unwrap();
 
         let result = app.last_result().expect("last_result should be Some");
         assert_eq!(result.rows.len(), 1);
@@ -556,10 +506,7 @@ pub mod tests {
             .iter()
             .filter(|e| matches!(e, TranscriptEntry::Error(_)))
             .count();
-        assert_eq!(
-            errors, 1,
-            "a failed raw SQL must record exactly one Error entry"
-        );
+        assert_eq!(errors, 1, "a failed raw SQL must record exactly one Error entry");
     }
 
     // ------------------------------------------------------------------
@@ -583,15 +530,11 @@ pub mod tests {
 
         // Switch to default mode and try to insert — reject it.
         app.mode = PermissionMode::Default;
-        app.handle_line("!INSERT INTO t VALUES (2,'b')", &mut AutoReject)
-            .await
-            .unwrap();
+        app.handle_line("!INSERT INTO t VALUES (2,'b')", &mut AutoReject).await.unwrap();
 
         // Switch back to wildcard to freely query.
         app.mode = PermissionMode::Wildcard;
-        app.handle_line("!SELECT count(*) FROM t", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!SELECT count(*) FROM t", &mut AutoApprove).await.unwrap();
 
         let result = app.last_result().expect("last_result");
         // COUNT(*) returns a single row with value "1".
@@ -608,22 +551,14 @@ pub mod tests {
         let url = format!("sqlite:{}", tmp.path().display());
         let mut app = make_app_guard(&url, PermissionMode::Wildcard, true, vec![]).await;
 
-        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove)
-            .await
-            .unwrap();
-        app.handle_line("!INSERT INTO t VALUES (42)", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("!INSERT INTO t VALUES (42)", &mut AutoApprove).await.unwrap();
 
         // DROP TABLE is catastrophic → PromptCatastrophic → AutoReject.
-        app.handle_line("!DROP TABLE t", &mut AutoReject)
-            .await
-            .unwrap();
+        app.handle_line("!DROP TABLE t", &mut AutoReject).await.unwrap();
 
         // Table should still exist.
-        app.handle_line("!SELECT * FROM t", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!SELECT * FROM t", &mut AutoApprove).await.unwrap();
 
         let result = app.last_result().expect("last_result");
         assert_eq!(result.rows.len(), 1);
@@ -640,19 +575,13 @@ pub mod tests {
 
         // Set up data in wildcard.
         let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
-        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove)
-            .await
-            .unwrap();
-        app.handle_line("!INSERT INTO t VALUES (7)", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("!INSERT INTO t VALUES (7)", &mut AutoApprove).await.unwrap();
 
         // Switch to readonly.
         app.mode = PermissionMode::ReadOnly;
 
-        app.handle_line("!SELECT * FROM t", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!SELECT * FROM t", &mut AutoApprove).await.unwrap();
 
         let result = app.last_result().expect("last_result");
         assert_eq!(result.rows.len(), 1);
@@ -674,10 +603,7 @@ pub mod tests {
             .handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove)
             .await
             .unwrap();
-        setup
-            .handle_line("!INSERT INTO t VALUES (99)", &mut AutoApprove)
-            .await
-            .unwrap();
+        setup.handle_line("!INSERT INTO t VALUES (99)", &mut AutoApprove).await.unwrap();
         drop(setup);
 
         // Build scripted provider:
@@ -708,9 +634,7 @@ pub mod tests {
 
         let mut app = make_app(&url, PermissionMode::Wildcard, vec![resp1, resp2]).await;
 
-        app.handle_natural_language("show t", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_natural_language("show t", &mut AutoApprove).await.unwrap();
 
         // Agent answer recorded.
         let has_agent = app
@@ -724,10 +648,7 @@ pub mod tests {
         assert_eq!(result.rows.len(), 1);
 
         // Usage accumulated.
-        assert!(
-            app.usage().input_tokens > 0,
-            "cumulative usage should be > 0"
-        );
+        assert!(app.usage().input_tokens > 0, "cumulative usage should be > 0");
     }
 
     // ------------------------------------------------------------------
@@ -741,9 +662,7 @@ pub mod tests {
         let mut app = make_app(&url, PermissionMode::Default, vec![]).await;
 
         // /mode readonly
-        app.handle_line("/mode readonly", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("/mode readonly", &mut AutoApprove).await.unwrap();
         assert_eq!(app.mode(), PermissionMode::ReadOnly);
 
         // /cost — should add an Info entry.
@@ -788,10 +707,7 @@ pub mod tests {
 
         let schema = app.schema().expect("schema should be Some after /learn");
         let catalog = schema.compact_catalog();
-        assert!(
-            catalog.contains('t'),
-            "compact_catalog should mention table 't', got: {catalog}"
-        );
+        assert!(catalog.contains('t'), "compact_catalog should mention table 't', got: {catalog}");
     }
 
     // ------------------------------------------------------------------
@@ -806,15 +722,9 @@ pub mod tests {
 
         // Setup in wildcard.
         app.mode = PermissionMode::Wildcard;
-        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove)
-            .await
-            .unwrap();
-        app.handle_line("!INSERT INTO t VALUES (1)", &mut AutoApprove)
-            .await
-            .unwrap();
-        app.handle_line("!INSERT INTO t VALUES (2)", &mut AutoApprove)
-            .await
-            .unwrap();
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("!INSERT INTO t VALUES (1)", &mut AutoApprove).await.unwrap();
+        app.handle_line("!INSERT INTO t VALUES (2)", &mut AutoApprove).await.unwrap();
 
         // Now in default mode: user edits the SQL before approving.
         // The original SQL is "SELECT * FROM t" (read → Prompt in Default Primary).

@@ -77,17 +77,10 @@ impl OllamaProvider {
             })
             .unwrap_or_default();
 
-        let stop_reason = json
-            .get("done_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("stop")
-            .to_string();
+        let stop_reason = json.get("done_reason").and_then(Value::as_str).unwrap_or("stop").to_string();
 
         let usage = Usage {
-            input_tokens: json
-                .get("prompt_eval_count")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            input_tokens: json.get("prompt_eval_count").and_then(Value::as_u64).unwrap_or(0),
             output_tokens: json.get("eval_count").and_then(Value::as_u64).unwrap_or(0),
         };
 
@@ -125,10 +118,10 @@ fn map_message(msg: &Message) -> Value {
                     "tool_calls": tc,
                 })
             }
-        }
+        },
         Message::ToolResult { content, .. } => {
             json!({ "role": "tool", "content": content })
-        }
+        },
     }
 }
 
@@ -151,16 +144,10 @@ impl crate::LlmProvider for OllamaProvider {
             .map_err(|e| LlmError::Provider(e.to_string()))?;
 
         let status = resp.status();
-        let json: Value = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::Provider(e.to_string()))?;
+        let json: Value = resp.json().await.map_err(|e| LlmError::Provider(e.to_string()))?;
 
         if !status.is_success() {
-            let msg = json
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
+            let msg = json.get("error").and_then(Value::as_str).unwrap_or("unknown error");
             return Err(LlmError::Provider(format!("HTTP {status}: {msg}")));
         }
 

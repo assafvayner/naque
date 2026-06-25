@@ -154,9 +154,7 @@ mod tests {
             catastrophic: Some(CatastrophicReason::Truncate),
             label: "DDL: TRUNCATE".into(),
         };
-        let r = ClassifyResult {
-            statements: vec![cat],
-        };
+        let r = ClassifyResult { statements: vec![cat] };
         assert!(r.any_catastrophic());
         assert_eq!(r.first_catastrophic(), Some(CatastrophicReason::Truncate));
     }

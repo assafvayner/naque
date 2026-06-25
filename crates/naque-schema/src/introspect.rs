@@ -32,9 +32,7 @@ pub async fn current_fingerprint(db: &mut Database) -> Result<String, SchemaErro
 
 async fn introspect_sqlite(db: &mut Database) -> Result<SchemaModel, SchemaError> {
     let tables_result = db
-        .fetch_readonly(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        )
+        .fetch_readonly("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
         .await?;
 
     let table_names: Vec<String> = tables_result
@@ -69,9 +67,7 @@ async fn introspect_sqlite(db: &mut Database) -> Result<SchemaModel, SchemaError
 
 async fn sqlite_columns(db: &mut Database, table: &str) -> Result<Vec<ColumnInfo>, SchemaError> {
     // PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
-    let result = db
-        .fetch_readonly(&format!("PRAGMA table_info(\"{table}\")"))
-        .await?;
+    let result = db.fetch_readonly(&format!("PRAGMA table_info(\"{table}\")")).await?;
 
     let mut cols = Vec::new();
     for row in &result.rows {
@@ -96,14 +92,9 @@ async fn sqlite_columns(db: &mut Database, table: &str) -> Result<Vec<ColumnInfo
     Ok(cols)
 }
 
-async fn sqlite_foreign_keys(
-    db: &mut Database,
-    table: &str,
-) -> Result<Vec<ForeignKey>, SchemaError> {
+async fn sqlite_foreign_keys(db: &mut Database, table: &str) -> Result<Vec<ForeignKey>, SchemaError> {
     // PRAGMA foreign_key_list columns: id, seq, table, from, to, on_update, on_delete, match
-    let result = db
-        .fetch_readonly(&format!("PRAGMA foreign_key_list(\"{table}\")"))
-        .await?;
+    let result = db.fetch_readonly(&format!("PRAGMA foreign_key_list(\"{table}\")")).await?;
 
     // Group by id (each FK constraint may span multiple columns via seq).
     let mut groups: FkGroupMap = BTreeMap::new();
@@ -117,9 +108,7 @@ async fn sqlite_foreign_keys(
 
         let seq: u64 = seq_str.parse().unwrap_or(0);
 
-        let entry = groups
-            .entry(id)
-            .or_insert_with(|| (ref_table.clone(), Vec::new()));
+        let entry = groups.entry(id).or_insert_with(|| (ref_table.clone(), Vec::new()));
         entry.1.push((seq, from_col, to_col));
     }
 
@@ -139,9 +128,7 @@ async fn sqlite_foreign_keys(
 
 async fn sqlite_indexes(db: &mut Database, table: &str) -> Result<Vec<IndexInfo>, SchemaError> {
     // PRAGMA index_list columns: seq, name, unique, origin, partial
-    let list_result = db
-        .fetch_readonly(&format!("PRAGMA index_list(\"{table}\")"))
-        .await?;
+    let list_result = db.fetch_readonly(&format!("PRAGMA index_list(\"{table}\")")).await?;
 
     let mut indexes = Vec::new();
     for row in &list_result.rows {
@@ -155,9 +142,7 @@ async fn sqlite_indexes(db: &mut Database, table: &str) -> Result<Vec<IndexInfo>
         let unique = unique_str == "1";
 
         // PRAGMA index_info columns: seqno, cid, name
-        let info_result = db
-            .fetch_readonly(&format!("PRAGMA index_info(\"{idx_name}\")"))
-            .await?;
+        let info_result = db.fetch_readonly(&format!("PRAGMA index_info(\"{idx_name}\")")).await?;
 
         let mut col_entries: Vec<(i64, String)> = Vec::new();
         for irow in &info_result.rows {
@@ -166,11 +151,7 @@ async fn sqlite_indexes(db: &mut Database, table: &str) -> Result<Vec<IndexInfo>
             col_entries.push((seqno, col_name));
         }
         col_entries.sort_by_key(|(seq, _)| *seq);
-        let columns: Vec<String> = col_entries
-            .into_iter()
-            .map(|(_, c)| c)
-            .filter(|c| !c.is_empty())
-            .collect();
+        let columns: Vec<String> = col_entries.into_iter().map(|(_, c)| c).filter(|c| !c.is_empty()).collect();
 
         indexes.push(IndexInfo {
             name: idx_name,
@@ -231,10 +212,7 @@ async fn introspect_postgres(db: &mut Database) -> Result<SchemaModel, SchemaErr
             primary_key: false, // filled in below
         };
 
-        table_cols
-            .entry((schema, tname))
-            .or_default()
-            .push((ordinal, col));
+        table_cols.entry((schema, tname)).or_default().push((ordinal, col));
     }
 
     // Fetch primary key columns.
@@ -256,8 +234,7 @@ async fn introspect_postgres(db: &mut Database) -> Result<SchemaModel, SchemaErr
         .await?;
 
     // Set of (schema, table, col) that are PKs.
-    let mut pk_set: std::collections::HashSet<(String, String, String)> =
-        std::collections::HashSet::new();
+    let mut pk_set: std::collections::HashSet<(String, String, String)> = std::collections::HashSet::new();
     for row in &pk_result.rows {
         let schema = cell(row, 0).unwrap_or_default();
         let tname = cell(row, 1).unwrap_or_default();
@@ -327,14 +304,11 @@ async fn introspect_postgres(db: &mut Database) -> Result<SchemaModel, SchemaErr
         entries.sort_by_key(|(ord, _, _)| *ord);
         let columns: Vec<String> = entries.iter().map(|(_, c, _)| c.clone()).collect();
         let ref_columns: Vec<String> = entries.iter().map(|(_, _, r)| r.clone()).collect();
-        table_fks
-            .entry((schema, tname))
-            .or_default()
-            .push(ForeignKey {
-                columns,
-                ref_table,
-                ref_columns,
-            });
+        table_fks.entry((schema, tname)).or_default().push(ForeignKey {
+            columns,
+            ref_table,
+            ref_columns,
+        });
     }
 
     // Fetch indexes from pg_indexes.
@@ -361,14 +335,11 @@ async fn introspect_postgres(db: &mut Database) -> Result<SchemaModel, SchemaErr
         let unique = idx_def.contains("CREATE UNIQUE INDEX");
         let columns = parse_index_columns(&idx_def);
 
-        table_indexes
-            .entry((schema, tname))
-            .or_default()
-            .push(IndexInfo {
-                name: idx_name,
-                columns,
-                unique,
-            });
+        table_indexes.entry((schema, tname)).or_default().push(IndexInfo {
+            name: idx_name,
+            columns,
+            unique,
+        });
     }
 
     // Assemble TableInfo list.

@@ -9,14 +9,14 @@
 
 use std::path::PathBuf;
 
+use naque::app::App;
+use naque::approval::AutoApprove;
 use naque_core::{CatastrophicReason, GateDecision, PermissionMode};
 use naque_db::Database;
 use naque_llm::{Agent, AgentConfig, LlmResponse, MockProvider, Usage};
 use naque_tui::{ApprovalPrompt, StatusBar, Theme};
-use ratatui::{backend::TestBackend, Terminal};
-
-use naque::app::App;
-use naque::approval::AutoApprove;
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 
 // ---------------------------------------------------------------------------
 // Main
@@ -45,10 +45,7 @@ fn main() {
             .draw(|f| naque::ui::render(f, &app, &theme, "show me recent orders", None))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        frames.push((
-            "Frame 1: Main view — color, default mode (110×30)".to_string(),
-            buffer_to_html(&buf),
-        ));
+        frames.push(("Frame 1: Main view — color, default mode (110×30)".to_string(), buffer_to_html(&buf)));
     }
 
     // --- Frame 2: Main view, NO_COLOR ---
@@ -61,10 +58,7 @@ fn main() {
             .draw(|f| naque::ui::render(f, &app, &theme, "show me recent orders", None))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        frames.push((
-            "Frame 2: Main view — NO_COLOR (110×30)".to_string(),
-            buffer_to_html(&buf),
-        ));
+        frames.push(("Frame 2: Main view — NO_COLOR (110×30)".to_string(), buffer_to_html(&buf)));
     }
 
     // --- Frame 3: Approval prompt — WRITE ---
@@ -85,10 +79,7 @@ fn main() {
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        frames.push((
-            "Frame 3: Approval prompt — WRITE (color, 110×14)".to_string(),
-            buffer_to_html(&buf),
-        ));
+        frames.push(("Frame 3: Approval prompt — WRITE (color, 110×14)".to_string(), buffer_to_html(&buf)));
     }
 
     // --- Frame 4: Catastrophic guard — DROP (color) ---
@@ -109,10 +100,7 @@ fn main() {
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        frames.push((
-            "Frame 4: Catastrophic guard — DROP (color, 110×14)".to_string(),
-            buffer_to_html(&buf),
-        ));
+        frames.push(("Frame 4: Catastrophic guard — DROP (color, 110×14)".to_string(), buffer_to_html(&buf)));
     }
 
     // --- Frame 5: Catastrophic guard — DROP, NO_COLOR ---
@@ -133,18 +121,12 @@ fn main() {
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        frames.push((
-            "Frame 5: Catastrophic guard — DROP, NO_COLOR (110×14)".to_string(),
-            buffer_to_html(&buf),
-        ));
+        frames.push(("Frame 5: Catastrophic guard — DROP, NO_COLOR (110×14)".to_string(), buffer_to_html(&buf)));
     }
 
     // --- Frame 6: Status bars — all four modes (color) ---
     {
-        frames.push((
-            "Frame 6: Status bars — all four modes (color)".to_string(),
-            render_all_mode_status_bars(),
-        ));
+        frames.push(("Frame 6: Status bars — all four modes (color)".to_string(), render_all_mode_status_bars()));
     }
 
     // --- Frame 7: Result table (color, 90×14) ---
@@ -188,14 +170,7 @@ async fn build_populated_app() -> App {
         },
     );
 
-    let mut app = App::new(
-        db,
-        agent,
-        PermissionMode::Default,
-        "prod-analytics",
-        false,
-        200,
-    );
+    let mut app = App::new(db, agent, PermissionMode::Default, "prod-analytics", false, 200);
 
     // DDL — create tables.
     app.handle_line(
@@ -206,32 +181,20 @@ async fn build_populated_app() -> App {
     .ok();
 
     // Inserts — including one NULL.
-    app.handle_line(
-        "!INSERT INTO orders VALUES (1, 'Alice', 129.99, 'shipped')",
-        &mut AutoApprove,
-    )
-    .await
-    .ok();
-    app.handle_line(
-        "!INSERT INTO orders VALUES (2, 'Bob', 49.50, NULL)",
-        &mut AutoApprove,
-    )
-    .await
-    .ok();
-    app.handle_line(
-        "!INSERT INTO orders VALUES (3, 'Carol', 299.00, 'pending')",
-        &mut AutoApprove,
-    )
-    .await
-    .ok();
+    app.handle_line("!INSERT INTO orders VALUES (1, 'Alice', 129.99, 'shipped')", &mut AutoApprove)
+        .await
+        .ok();
+    app.handle_line("!INSERT INTO orders VALUES (2, 'Bob', 49.50, NULL)", &mut AutoApprove)
+        .await
+        .ok();
+    app.handle_line("!INSERT INTO orders VALUES (3, 'Carol', 299.00, 'pending')", &mut AutoApprove)
+        .await
+        .ok();
 
     // SELECT — populates last_result.
-    app.handle_line(
-        "!SELECT id, customer, amount, status FROM orders ORDER BY id",
-        &mut AutoApprove,
-    )
-    .await
-    .ok();
+    app.handle_line("!SELECT id, customer, amount, status FROM orders ORDER BY id", &mut AutoApprove)
+        .await
+        .ok();
 
     // The handle_line calls above already pushed Sql transcript entries.
     // Trigger a NL turn to populate User + Agent transcript entries naturally.
@@ -248,7 +211,8 @@ async fn build_populated_app() -> App {
 // ---------------------------------------------------------------------------
 
 fn render_all_mode_status_bars() -> String {
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     let theme = Theme::new(true);
     let width: u16 = 90;
@@ -284,7 +248,8 @@ fn render_all_mode_status_bars() -> String {
 
 fn render_result_table_standalone() -> String {
     use naque_tui::ResultTable;
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     let theme = Theme::new(true);
     let (w, h): (u16, u16) = (90, 14);
@@ -305,24 +270,14 @@ fn render_result_table_standalone() -> String {
                 Some("129.99".into()),
                 Some("shipped".into()),
             ],
-            vec![
-                Some("2".into()),
-                Some("Bob".into()),
-                Some("49.50".into()),
-                None,
-            ],
+            vec![Some("2".into()), Some("Bob".into()), Some("49.50".into()), None],
             vec![
                 Some("3".into()),
                 Some("Carol".into()),
                 Some("299.00".into()),
                 Some("pending".into()),
             ],
-            vec![
-                Some("4".into()),
-                Some("Dave".into()),
-                None,
-                Some("processing".into()),
-            ],
+            vec![Some("4".into()), Some("Dave".into()), None, Some("processing".into())],
         ],
     );
 
@@ -498,9 +453,7 @@ fn build_html_document(frames: &[(String, String)]) -> String {
 
     for (caption, pre_html) in frames {
         let escaped_caption = html_escape(caption);
-        doc.push_str(&format!(
-            "<div class=\"frame\">\n<h2>{escaped_caption}</h2>\n{pre_html}\n</div>\n"
-        ));
+        doc.push_str(&format!("<div class=\"frame\">\n<h2>{escaped_caption}</h2>\n{pre_html}\n</div>\n"));
     }
 
     doc.push_str("</body>\n</html>\n");

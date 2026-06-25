@@ -62,8 +62,7 @@ impl Database {
     ///
     /// Any write will be rejected by the database engine itself:
     /// - SQLite: `PRAGMA query_only = ON` causes the driver to return an error.
-    /// - Postgres: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` causes
-    ///   the server to reject writes.
+    /// - Postgres: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` causes the server to reject writes.
     pub async fn execute_readonly(&mut self, sql: &str) -> Result<u64, DbError> {
         self.readonly.execute(sql).await
     }
@@ -87,17 +86,15 @@ impl Database {
 async fn open_conn(engine: Engine, url: &str) -> Result<Conn, DbError> {
     match engine {
         Engine::Postgres => {
-            let conn = PgConnection::connect(url)
-                .await
-                .map_err(|e| DbError::Connect(e.to_string()))?;
+            let conn = PgConnection::connect(url).await.map_err(|e| DbError::Connect(e.to_string()))?;
             Ok(Conn::Pg(conn))
-        }
+        },
         Engine::Sqlite => {
             let conn = SqliteConnection::connect(url)
                 .await
                 .map_err(|e| DbError::Connect(e.to_string()))?;
             Ok(Conn::Sqlite(conn))
-        }
+        },
     }
 }
 

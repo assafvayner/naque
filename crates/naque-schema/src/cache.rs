@@ -21,7 +21,7 @@ pub fn load_schema(cache_dir: &Path) -> Result<Option<SchemaModel>, SchemaError>
         Ok(s) => {
             let model: SchemaModel = serde_json::from_str(&s)?;
             Ok(Some(model))
-        }
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(SchemaError::Io(e)),
     }

@@ -48,7 +48,7 @@ pub fn gate_decision(
             } else {
                 GateDecision::Prompt
             }
-        }
+        },
     }
 }
 
@@ -106,12 +106,7 @@ mod tests {
     #[test]
     fn wildcard_read_primary_auto_approve() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Wildcard,
-                &read_class(),
-                QueryKind::Primary,
-                false
-            ),
+            gate_decision(PermissionMode::Wildcard, &read_class(), QueryKind::Primary, false),
             GateDecision::AutoApprove
         );
     }
@@ -119,12 +114,7 @@ mod tests {
     #[test]
     fn wildcard_catastrophic_guard_on_prompt_catastrophic() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Wildcard,
-                &catastrophic_class(),
-                QueryKind::Primary,
-                true
-            ),
+            gate_decision(PermissionMode::Wildcard, &catastrophic_class(), QueryKind::Primary, true),
             GateDecision::PromptCatastrophic
         );
     }
@@ -132,12 +122,7 @@ mod tests {
     #[test]
     fn wildcard_catastrophic_guard_off_auto_approve() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Wildcard,
-                &catastrophic_class(),
-                QueryKind::Primary,
-                false
-            ),
+            gate_decision(PermissionMode::Wildcard, &catastrophic_class(), QueryKind::Primary, false),
             GateDecision::AutoApprove
         );
     }
@@ -147,12 +132,7 @@ mod tests {
     #[test]
     fn strict_read_introspection_prompt() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Strict,
-                &read_class(),
-                QueryKind::Introspection,
-                false
-            ),
+            gate_decision(PermissionMode::Strict, &read_class(), QueryKind::Introspection, false),
             GateDecision::Prompt
         );
     }
@@ -160,12 +140,7 @@ mod tests {
     #[test]
     fn strict_read_primary_prompt() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Strict,
-                &read_class(),
-                QueryKind::Primary,
-                false
-            ),
+            gate_decision(PermissionMode::Strict, &read_class(), QueryKind::Primary, false),
             GateDecision::Prompt
         );
     }
@@ -175,12 +150,7 @@ mod tests {
     #[test]
     fn default_introspection_auto_approve() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Default,
-                &read_class(),
-                QueryKind::Introspection,
-                false
-            ),
+            gate_decision(PermissionMode::Default, &read_class(), QueryKind::Introspection, false),
             GateDecision::AutoApprove
         );
     }
@@ -188,12 +158,7 @@ mod tests {
     #[test]
     fn default_read_primary_prompt() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Default,
-                &read_class(),
-                QueryKind::Primary,
-                false
-            ),
+            gate_decision(PermissionMode::Default, &read_class(), QueryKind::Primary, false),
             GateDecision::Prompt
         );
     }
@@ -201,12 +166,7 @@ mod tests {
     #[test]
     fn default_write_primary_prompt() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::Default,
-                &write_class(),
-                QueryKind::Primary,
-                false
-            ),
+            gate_decision(PermissionMode::Default, &write_class(), QueryKind::Primary, false),
             GateDecision::Prompt
         );
     }
@@ -216,12 +176,7 @@ mod tests {
     #[test]
     fn readonly_read_primary_auto_approve() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::ReadOnly,
-                &read_class(),
-                QueryKind::Primary,
-                false
-            ),
+            gate_decision(PermissionMode::ReadOnly, &read_class(), QueryKind::Primary, false),
             GateDecision::AutoApprove
         );
     }
@@ -229,12 +184,7 @@ mod tests {
     #[test]
     fn readonly_write_primary_prompt() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::ReadOnly,
-                &write_class(),
-                QueryKind::Primary,
-                false
-            ),
+            gate_decision(PermissionMode::ReadOnly, &write_class(), QueryKind::Primary, false),
             GateDecision::Prompt
         );
     }
@@ -242,12 +192,7 @@ mod tests {
     #[test]
     fn readonly_write_catastrophic_guard_on_prompt_catastrophic() {
         assert_eq!(
-            gate_decision(
-                PermissionMode::ReadOnly,
-                &catastrophic_write_class(),
-                QueryKind::Primary,
-                true
-            ),
+            gate_decision(PermissionMode::ReadOnly, &catastrophic_write_class(), QueryKind::Primary, true),
             GateDecision::PromptCatastrophic
         );
     }

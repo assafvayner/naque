@@ -1,20 +1,15 @@
 //! Accept / Edit / Reject approval flow for a query.
 
-use ratatui::{
-    buffer::Buffer,
-    crossterm::event::KeyEvent,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::Widget,
-};
-
 use naque_core::{CatastrophicReason, GateDecision};
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::KeyEvent;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 
-use crate::{
-    picker::{Picker, PickerOption, PickerOutcome},
-    Theme,
-};
+use crate::picker::{Picker, PickerOption, PickerOutcome};
+use crate::Theme;
 
 /// The user's decision from the approval prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,12 +35,7 @@ impl ApprovalPrompt {
     ///
     /// Options are always in this fixed order: Accept (a), Edit (e), Reject (r).
     /// If `decision` is `PromptCatastrophic`, the initial selection is Reject (index 2).
-    pub fn new(
-        sql: String,
-        label: String,
-        catastrophic: Option<CatastrophicReason>,
-        decision: GateDecision,
-    ) -> Self {
+    pub fn new(sql: String, label: String, catastrophic: Option<CatastrophicReason>, decision: GateDecision) -> Self {
         let options = vec![
             PickerOption {
                 label: "Accept".into(),
@@ -92,23 +82,12 @@ impl ApprovalPrompt {
     /// Widest content line (header, warning, or any SQL line), in characters.
     /// Used by callers to size a containing modal wide enough for the content.
     pub fn content_width(&self) -> usize {
-        let header = format!("Run this query?  classified: {}", self.label)
-            .chars()
-            .count();
+        let header = format!("Run this query?  classified: {}", self.label).chars().count();
         let warning = self
             .catastrophic
-            .map(|r| {
-                format!("⚠  CATASTROPHIC: {} — review carefully!", r.human())
-                    .chars()
-                    .count()
-            })
+            .map(|r| format!("⚠  CATASTROPHIC: {} — review carefully!", r.human()).chars().count())
             .unwrap_or(0);
-        let sql = self
-            .sql
-            .lines()
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(0);
+        let sql = self.sql.lines().map(|l| l.chars().count()).max().unwrap_or(0);
         // The picker options are short ("❯ (e) Edit before run"); the header
         // and SQL dominate, so consider those.
         header.max(warning).max(sql)
@@ -213,9 +192,12 @@ impl ApprovalPrompt {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use naque_core::GateDecision;
-    use ratatui::{buffer::Buffer, crossterm::event::KeyCode, layout::Rect};
+    use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::KeyCode;
+    use ratatui::layout::Rect;
+
+    use super::*;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
@@ -239,57 +221,39 @@ mod tests {
     #[test]
     fn shortcut_a_returns_accept() {
         let mut p = prompt(GateDecision::Prompt);
-        assert_eq!(
-            p.handle_key(key(KeyCode::Char('a'))),
-            Some(ApprovalChoice::Accept)
-        );
+        assert_eq!(p.handle_key(key(KeyCode::Char('a'))), Some(ApprovalChoice::Accept));
     }
 
     #[test]
     fn shortcut_e_returns_edit() {
         let mut p = prompt(GateDecision::Prompt);
-        assert_eq!(
-            p.handle_key(key(KeyCode::Char('e'))),
-            Some(ApprovalChoice::Edit)
-        );
+        assert_eq!(p.handle_key(key(KeyCode::Char('e'))), Some(ApprovalChoice::Edit));
     }
 
     #[test]
     fn shortcut_r_returns_reject() {
         let mut p = prompt(GateDecision::Prompt);
-        assert_eq!(
-            p.handle_key(key(KeyCode::Char('r'))),
-            Some(ApprovalChoice::Reject)
-        );
+        assert_eq!(p.handle_key(key(KeyCode::Char('r'))), Some(ApprovalChoice::Reject));
     }
 
     #[test]
     fn esc_returns_reject() {
         let mut p = prompt(GateDecision::Prompt);
-        assert_eq!(
-            p.handle_key(key(KeyCode::Esc)),
-            Some(ApprovalChoice::Reject)
-        );
+        assert_eq!(p.handle_key(key(KeyCode::Esc)), Some(ApprovalChoice::Reject));
     }
 
     #[test]
     fn enter_on_default_prompt_returns_accept() {
         let mut p = prompt(GateDecision::Prompt);
         // Default selection is 0 (Accept) for a normal Prompt
-        assert_eq!(
-            p.handle_key(key(KeyCode::Enter)),
-            Some(ApprovalChoice::Accept)
-        );
+        assert_eq!(p.handle_key(key(KeyCode::Enter)), Some(ApprovalChoice::Accept));
     }
 
     #[test]
     fn enter_on_catastrophic_default_returns_reject() {
         let mut p = catastrophic_prompt();
         // PromptCatastrophic defaults to Reject (index 2)
-        assert_eq!(
-            p.handle_key(key(KeyCode::Enter)),
-            Some(ApprovalChoice::Reject)
-        );
+        assert_eq!(p.handle_key(key(KeyCode::Enter)), Some(ApprovalChoice::Reject));
     }
 
     #[test]
@@ -325,10 +289,7 @@ mod tests {
         let p = prompt(GateDecision::Prompt);
         let buf = render_prompt(&p);
         let content = buf_to_string(&buf, 80, 20);
-        assert!(
-            content.contains("SELECT 1"),
-            "expected SQL in render output: {content}"
-        );
+        assert!(content.contains("SELECT 1"), "expected SQL in render output: {content}");
     }
 
     #[test]
@@ -336,14 +297,8 @@ mod tests {
         let p = catastrophic_prompt();
         let buf = render_prompt(&p);
         let content = buf_to_string(&buf, 80, 20);
-        assert!(
-            content.contains("DROP TABLE users"),
-            "expected SQL: {content}"
-        );
-        assert!(
-            content.contains("DROP"),
-            "expected catastrophic reason in render output: {content}"
-        );
+        assert!(content.contains("DROP TABLE users"), "expected SQL: {content}");
+        assert!(content.contains("DROP"), "expected catastrophic reason in render output: {content}");
     }
 
     #[test]
@@ -351,10 +306,7 @@ mod tests {
         let p = catastrophic_prompt();
         let buf = render_prompt(&p);
         let content = buf_to_string(&buf, 80, 20);
-        assert!(
-            content.contains("CATASTROPHIC"),
-            "expected CATASTROPHIC warning: {content}"
-        );
+        assert!(content.contains("CATASTROPHIC"), "expected CATASTROPHIC warning: {content}");
     }
 
     #[test]

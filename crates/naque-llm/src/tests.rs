@@ -1,6 +1,4 @@
-use crate::{
-    standard_tools, Agent, AgentConfig, LlmResponse, MockExecutor, MockProvider, ToolCall, Usage,
-};
+use crate::{standard_tools, Agent, AgentConfig, LlmResponse, MockExecutor, MockProvider, ToolCall, Usage};
 
 fn config(max_iterations: u32) -> AgentConfig {
     AgentConfig {
@@ -71,10 +69,7 @@ async fn test_one_tool_then_answer() {
     let mut agent = Agent::new(Box::new(provider), config(5));
     let mut executor = MockExecutor::new().on_success("run_query", "42 rows");
 
-    let result = agent
-        .run_turn("query something", "", &mut executor)
-        .await
-        .unwrap();
+    let result = agent.run_turn("query something", "", &mut executor).await.unwrap();
 
     assert_eq!(result.answer, "done");
     assert_eq!(result.iterations, 2);
@@ -96,16 +91,12 @@ async fn test_one_tool_then_answer() {
 #[tokio::test]
 async fn test_tool_error_feeds_back() {
     let tc = tool_call("id2", "run_query");
-    let provider =
-        MockProvider::new([tool_response(tc.clone()), text_response("recovered", 15, 6)]);
+    let provider = MockProvider::new([tool_response(tc.clone()), text_response("recovered", 15, 6)]);
     let mut agent = Agent::new(Box::new(provider), config(5));
     // executor will return an error for run_query
     let mut executor = MockExecutor::new().on_error("run_query", "permission denied");
 
-    let result = agent
-        .run_turn("query again", "", &mut executor)
-        .await
-        .unwrap();
+    let result = agent.run_turn("query again", "", &mut executor).await.unwrap();
 
     assert_eq!(result.answer, "recovered");
     assert_eq!(result.iterations, 2);
@@ -130,10 +121,7 @@ async fn test_iteration_cap() {
     let mut agent = Agent::new(Box::new(provider), config(2));
     let mut executor = MockExecutor::new().on_success("inspect_table", "some schema");
 
-    let result = agent
-        .run_turn("keep calling tools", "", &mut executor)
-        .await
-        .unwrap();
+    let result = agent.run_turn("keep calling tools", "", &mut executor).await.unwrap();
 
     assert!(result.hit_iteration_cap);
     assert_eq!(result.iterations, 2);
@@ -153,10 +141,7 @@ async fn test_conversation_memory_and_clear() {
     let mut executor = MockExecutor::new();
 
     // Turn 1
-    let _ = agent
-        .run_turn("first question", "", &mut executor)
-        .await
-        .unwrap();
+    let _ = agent.run_turn("first question", "", &mut executor).await.unwrap();
     // History should have User + Assistant = 2 messages.
     assert!(agent.history_len() > 0);
 
@@ -164,10 +149,7 @@ async fn test_conversation_memory_and_clear() {
     // plus the new user message).  We can't inspect the request directly here,
     // but we can verify the history grows correctly.
     let before = agent.history_len();
-    let _ = agent
-        .run_turn("second question", "", &mut executor)
-        .await
-        .unwrap();
+    let _ = agent.run_turn("second question", "", &mut executor).await.unwrap();
     // Two more messages (User + Assistant) added.
     assert_eq!(agent.history_len(), before + 2);
 
@@ -189,10 +171,7 @@ async fn test_provider_sees_prior_messages_on_second_turn() {
 
     #[async_trait::async_trait]
     impl crate::LlmProvider for SharedProvider {
-        async fn complete(
-            &self,
-            req: &crate::LlmRequest,
-        ) -> Result<crate::LlmResponse, crate::LlmError> {
+        async fn complete(&self, req: &crate::LlmRequest) -> Result<crate::LlmResponse, crate::LlmError> {
             self.0.complete(req).await
         }
         fn name(&self) -> &str {
@@ -222,19 +201,12 @@ fn test_standard_tools() {
     let tools = standard_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-    assert_eq!(
-        names,
-        vec!["inspect_table", "sample_table", "explain", "run_query"]
-    );
+    assert_eq!(names, vec!["inspect_table", "sample_table", "explain", "run_query"]);
 
     for tool in &tools {
         assert!(!tool.name.is_empty());
         assert!(!tool.description.is_empty());
         // input_schema must be a JSON object
-        assert!(
-            tool.input_schema.is_object(),
-            "input_schema for '{}' must be an object",
-            tool.name
-        );
+        assert!(tool.input_schema.is_object(), "input_schema for '{}' must be an object", tool.name);
     }
 }

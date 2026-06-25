@@ -4,13 +4,11 @@
 //! TUI render. In CSV export `NULL` becomes an empty field; in JSON export it
 //! becomes a JSON `null`.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Widget,
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 
 use crate::Theme;
 
@@ -84,11 +82,7 @@ impl ResultTable {
     /// Only the visible window (from `offset`) contributes, so columns stay
     /// stable as the user scrolls within a page.
     fn column_widths(&self) -> Vec<usize> {
-        let mut widths: Vec<usize> = self
-            .columns
-            .iter()
-            .map(|c| display_len(c).min(MAX_COL_WIDTH))
-            .collect();
+        let mut widths: Vec<usize> = self.columns.iter().map(|c| display_len(c).min(MAX_COL_WIDTH)).collect();
 
         for row in self.rows.iter().skip(self.offset) {
             for (i, cell) in row.iter().enumerate() {
@@ -122,8 +116,7 @@ impl ResultTable {
         let widths = self.column_widths();
         // Total table width: sum of column widths plus " | " (3 chars) between
         // each adjacent pair of columns.
-        let table_width: usize =
-            widths.iter().sum::<usize>() + SEP.len() * widths.len().saturating_sub(1);
+        let table_width: usize = widths.iter().sum::<usize>() + SEP.len() * widths.len().saturating_sub(1);
 
         let mut y = area.y;
 
@@ -138,10 +131,7 @@ impl ResultTable {
                     let w = widths.get(i).copied().unwrap_or_else(|| display_len(col));
                     vec![
                         Span::raw(sep),
-                        Span::styled(
-                            pad_or_truncate(col, w),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled(pad_or_truncate(col, w), Style::default().add_modifier(Modifier::BOLD)),
                     ]
                 })
                 .collect();
@@ -213,8 +203,8 @@ impl ResultTable {
     ///
     /// - Header row comes first.
     /// - `NULL` → empty field.
-    /// - Fields containing a comma, double-quote, or newline are wrapped in
-    ///   double-quotes with internal double-quotes doubled (`""`).
+    /// - Fields containing a comma, double-quote, or newline are wrapped in double-quotes with internal double-quotes
+    ///   doubled (`""`).
     /// - Lines end with `\n` (LF only).
     pub fn to_csv(&self) -> String {
         let mut out = String::new();
@@ -253,8 +243,7 @@ impl ResultTable {
                 serde_json::Value::Object(map)
             })
             .collect();
-        serde_json::to_string(&serde_json::Value::Array(objects))
-            .expect("serializing owned data should never fail")
+        serde_json::to_string(&serde_json::Value::Array(objects)).expect("serializing owned data should never fail")
     }
 }
 
@@ -276,16 +265,14 @@ fn csv_field(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ratatui::layout::Rect;
+
+    use super::*;
 
     fn table() -> ResultTable {
         ResultTable::new(
             vec!["id".into(), "name".into()],
-            vec![
-                vec![Some("1".into()), Some("a".into())],
-                vec![Some("2".into()), None],
-            ],
+            vec![vec![Some("1".into()), Some("a".into())], vec![Some("2".into()), None]],
         )
     }
 
@@ -407,10 +394,7 @@ mod tests {
         t.render(&Theme::new(false), area, &mut buf);
         let content = buf_to_string(&buf, 40, 10);
         assert!(content.contains("id"), "expected 'id' in render: {content}");
-        assert!(
-            content.contains("name"),
-            "expected 'name' in render: {content}"
-        );
+        assert!(content.contains("name"), "expected 'name' in render: {content}");
     }
 
     #[test]
@@ -420,14 +404,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         t.render(&Theme::new(false), area, &mut buf);
         let content = buf_to_string(&buf, 40, 10);
-        assert!(
-            content.contains('1'),
-            "expected cell value '1' in render: {content}"
-        );
-        assert!(
-            content.contains('a'),
-            "expected cell value 'a' in render: {content}"
-        );
+        assert!(content.contains('1'), "expected cell value '1' in render: {content}");
+        assert!(content.contains('a'), "expected cell value 'a' in render: {content}");
     }
 
     // --- column alignment ---
@@ -477,10 +455,7 @@ mod tests {
 
         let row = |y: u16| -> String {
             (0..40)
-                .map(|x| {
-                    buf.cell((x, y))
-                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-                })
+                .map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
                 .collect()
         };
 
@@ -512,18 +487,12 @@ mod tests {
         t.render(&Theme::new(false), area, &mut buf);
 
         let sep_row: String = (0..40)
-            .map(|x| {
-                buf.cell((x, 1))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
+            .map(|x| buf.cell((x, 1)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
             .collect();
         let dashes = sep_row.chars().take_while(|&c| c == '-').count();
         assert_eq!(dashes, 9, "separator should be table width 9, got {dashes}");
         // Beyond the table width the separator row must be blank.
-        assert!(
-            sep_row[9..].chars().all(|c| c == ' '),
-            "separator must not span full area width: {sep_row:?}"
-        );
+        assert!(sep_row[9..].chars().all(|c| c == ' '), "separator must not span full area width: {sep_row:?}");
     }
 
     // --- pad_or_truncate ---

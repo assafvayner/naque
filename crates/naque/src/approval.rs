@@ -62,8 +62,8 @@ impl ScriptedApprover {
 
 impl Approver for ScriptedApprover {
     fn approve(&mut self, sql: &str, _label: &str, _decision: GateDecision) -> ApprovalDecision {
-        self.queue.pop_front().unwrap_or_else(|| {
-            panic!("ScriptedApprover: queue exhausted (approve called for: {sql:?})")
-        })
+        self.queue
+            .pop_front()
+            .unwrap_or_else(|| panic!("ScriptedApprover: queue exhausted (approve called for: {sql:?})"))
     }
 }

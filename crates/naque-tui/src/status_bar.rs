@@ -3,14 +3,11 @@
 //! Format (all on one line):
 //! `profile=<name>  mode=<mode>  tx=none|open  tokens=<n>  $<cost>`
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Span},
-    widgets::Widget,
-};
-
 use naque_core::PermissionMode;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 
 use crate::Theme;
 
@@ -65,16 +62,12 @@ impl StatusBar {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
-    fn make_bar(
-        profile: &str,
-        mode: PermissionMode,
-        in_tx: bool,
-        tokens: u64,
-        cost: f64,
-    ) -> StatusBar {
+    use super::*;
+
+    fn make_bar(profile: &str, mode: PermissionMode, in_tx: bool, tokens: u64, cost: f64) -> StatusBar {
         StatusBar {
             profile: profile.into(),
             mode,
@@ -89,10 +82,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         bar.render(&Theme::new(false), area, &mut buf);
         (0..120)
-            .map(|x| {
-                buf.cell((x, 0))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
+            .map(|x| buf.cell((x, 0)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
             .collect()
     }
 

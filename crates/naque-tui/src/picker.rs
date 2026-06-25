@@ -4,13 +4,11 @@
 //! them with Up/Down arrows (selection **clamps** at the ends rather than
 //! wrapping, keeping navigation predictable) or by pressing a shortcut key.
 
-use ratatui::{
-    buffer::Buffer,
-    crossterm::event::{KeyCode, KeyEvent},
-    layout::Rect,
-    text::{Line, Span},
-    widgets::Widget,
-};
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 
 use crate::Theme;
 
@@ -47,10 +45,7 @@ impl Picker {
     /// Panics if `options` is empty.
     pub fn new(options: Vec<PickerOption>) -> Self {
         assert!(!options.is_empty(), "Picker requires at least one option");
-        Self {
-            options,
-            selected: 0,
-        }
+        Self { options, selected: 0 }
     }
 
     /// Index of the currently highlighted option.
@@ -80,11 +75,11 @@ impl Picker {
             KeyCode::Up => {
                 self.up();
                 None
-            }
+            },
             KeyCode::Down => {
                 self.down();
                 None
-            }
+            },
             KeyCode::Enter => Some(PickerOutcome::Selected(self.selected)),
             KeyCode::Char(c) => {
                 let c_lower = c.to_ascii_lowercase();
@@ -94,7 +89,7 @@ impl Picker {
                         .filter(|&s| s == c_lower)
                         .map(|_| PickerOutcome::Selected(i))
                 })
-            }
+            },
             KeyCode::Esc => Some(PickerOutcome::Cancelled),
             _ => None,
         }
@@ -140,8 +135,10 @@ impl Picker {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
 
     fn make_options() -> Vec<PickerOption> {
         vec![
@@ -286,15 +283,9 @@ mod tests {
         let buf = render_picker(&p, 40, 5);
         // Row 0 is selected; it should contain the ❯ marker
         let row0: String = (0..40)
-            .map(|x| {
-                buf.cell((x, 0))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
+            .map(|x| buf.cell((x, 0)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
             .collect();
-        assert!(
-            row0.contains('❯'),
-            "selected row must contain ❯, got: {row0:?}"
-        );
+        assert!(row0.contains('❯'), "selected row must contain ❯, got: {row0:?}");
     }
 
     #[test]
@@ -303,15 +294,9 @@ mod tests {
         let buf = render_picker(&p, 40, 5);
         // Row 1 is not selected; it must NOT contain ❯
         let row1: String = (0..40)
-            .map(|x| {
-                buf.cell((x, 1))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
+            .map(|x| buf.cell((x, 1)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
             .collect();
-        assert!(
-            !row1.contains('❯'),
-            "non-selected row must not contain ❯, got: {row1:?}"
-        );
+        assert!(!row1.contains('❯'), "non-selected row must not contain ❯, got: {row1:?}");
     }
 
     #[test]
@@ -329,14 +314,8 @@ mod tests {
 
         let buf = terminal.backend().buffer().clone();
         let row1: String = (0..40)
-            .map(|x| {
-                buf.cell((x, 1))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
+            .map(|x| buf.cell((x, 1)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
             .collect();
-        assert!(
-            row1.contains('❯'),
-            "row 1 (Edit) should be selected: {row1:?}"
-        );
+        assert!(row1.contains('❯'), "row 1 (Edit) should be selected: {row1:?}");
     }
 }

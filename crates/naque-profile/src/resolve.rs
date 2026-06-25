@@ -54,10 +54,7 @@ impl std::fmt::Debug for Resolved {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Redact `connection_url` so its cleartext password never leaks into
         // logs via `{:?}`. Preserve the `Some`/`None` shape for diagnostics.
-        let connection_url = self
-            .connection_url
-            .as_ref()
-            .map(|_| "<redacted>".to_string());
+        let connection_url = self.connection_url.as_ref().map(|_| "<redacted>".to_string());
         f.debug_struct("Resolved")
             .field("config", &self.config)
             .field("profiles", &self.profiles)
@@ -101,10 +98,10 @@ pub fn resolve(
         Some(toml_path) => {
             let dir = toml_path.parent().map(PathBuf::from);
             let raw = std::fs::read_to_string(&toml_path).map_err(ConfigError::io)?;
-            let file: NaqueFile = toml::from_str(&raw)
-                .map_err(|e| ConfigError::parse(toml_path.display().to_string(), e))?;
+            let file: NaqueFile =
+                toml::from_str(&raw).map_err(|e| ConfigError::parse(toml_path.display().to_string(), e))?;
             (file, dir)
-        }
+        },
         None => (NaqueFile::default(), None),
     };
 
@@ -115,10 +112,7 @@ pub fn resolve(
 
     for (name, body) in local.profiles.clone().unwrap_or_default() {
         if profiles.contains_key(&name) {
-            warnings.push(format!(
-                "profile '{}' from naque.toml overrides central profile",
-                name
-            ));
+            warnings.push(format!("profile '{}' from naque.toml overrides central profile", name));
         }
         profiles.insert(name, body);
     }
@@ -167,10 +161,7 @@ pub fn resolve(
         if let Some(body) = profiles.get(name) {
             Some(body.connection.resolve_url(secrets)?)
         } else {
-            warnings.push(format!(
-                "active profile '{}' not found in profiles; falling back to DATABASE_URL",
-                name
-            ));
+            warnings.push(format!("active profile '{}' not found in profiles; falling back to DATABASE_URL", name));
             secrets.env("DATABASE_URL")
         }
     } else {
@@ -193,8 +184,8 @@ impl ConnectionSpec {
     /// If `url` is set, it is returned after `${VAR}` interpolation via
     /// `secrets.env`. Otherwise the URL is assembled from components:
     ///
-    /// - `postgres`: `postgres://user[:pass]@host[:port]/dbname[?params]`
-    ///   (user, password, and query params are percent-encoded)
+    /// - `postgres`: `postgres://user[:pass]@host[:port]/dbname[?params]` (user, password, and query params are
+    ///   percent-encoded)
     /// - `sqlite`: `sqlite://<path>`
     ///
     /// Returns an error if required fields are missing, a referenced secret is
@@ -233,18 +224,12 @@ impl ConnectionSpec {
         // peer auth or no password).
         let password = if let Some(env_var) = &self.password_env {
             let val = secrets.env(env_var).ok_or_else(|| {
-                ConfigError::Other(format!(
-                    "postgres profile: password_env '{}' is not set",
-                    env_var
-                ))
+                ConfigError::Other(format!("postgres profile: password_env '{}' is not set", env_var))
             })?;
             Some(val)
         } else if let Some(account) = &self.password_keyring {
             let val = secrets.keyring(account).ok_or_else(|| {
-                ConfigError::Other(format!(
-                    "postgres profile: keyring account '{}' not found",
-                    account
-                ))
+                ConfigError::Other(format!("postgres profile: keyring account '{}' not found", account))
             })?;
             Some(val)
         } else {
@@ -278,10 +263,7 @@ impl ConnectionSpec {
             String::new()
         };
 
-        Ok(format!(
-            "postgres://{}@{}:{}/{}{}",
-            userinfo, host, port, dbname, query
-        ))
+        Ok(format!("postgres://{}@{}:{}/{}{}", userinfo, host, port, dbname, query))
     }
 
     fn build_sqlite_url(&self) -> Result<String, ConfigError> {
@@ -327,9 +309,9 @@ fn interpolate_env(s: &str, secrets: &dyn Secrets) -> Result<String, ConfigError
         let after_brace = &rest[start + 2..];
         if let Some(end) = after_brace.find('}') {
             let var = &after_brace[..end];
-            let val = secrets.env(var).ok_or_else(|| {
-                ConfigError::Other(format!("url interpolation: variable '{}' is not set", var))
-            })?;
+            let val = secrets
+                .env(var)
+                .ok_or_else(|| ConfigError::Other(format!("url interpolation: variable '{}' is not set", var)))?;
             result.push_str(&val);
             rest = &after_brace[end + 1..];
         } else {
@@ -344,9 +326,10 @@ fn interpolate_env(s: &str, secrets: &dyn Secrets) -> Result<String, ConfigError
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
     use std::fs;
+
+    use super::*;
 
     // -------------------------------------------------------------------------
     // Fake Secrets implementation backed by a HashMap
@@ -388,11 +371,7 @@ mod tests {
     // -------------------------------------------------------------------------
     // Helper: build a Store over a temp dir with optional config/profiles files
     // -------------------------------------------------------------------------
-    fn make_store(
-        tmp: &tempfile::TempDir,
-        config_toml: Option<&str>,
-        profiles_toml: Option<&str>,
-    ) -> Store {
+    fn make_store(tmp: &tempfile::TempDir, config_toml: Option<&str>, profiles_toml: Option<&str>) -> Store {
         let home = tmp.path().join("naque-home");
         fs::create_dir_all(&home).unwrap();
         if let Some(s) = config_toml {
@@ -663,10 +642,7 @@ dbname = "pdb"
             };
             let secrets = FakeSecrets::new().with_env("DATABASE_URL", "postgres://env/db");
             let resolved = resolve(&store, &local_dir, &overrides, &secrets).unwrap();
-            assert_eq!(
-                resolved.connection_url.as_deref(),
-                Some("postgres://override/db")
-            );
+            assert_eq!(resolved.connection_url.as_deref(), Some("postgres://override/db"));
         }
 
         // Case 2: no override.url → active profile's url
@@ -691,10 +667,7 @@ dbname = "pdb"
             let overrides = Overrides::default();
             let secrets = FakeSecrets::new().with_env("DATABASE_URL", "postgres://env/db");
             let resolved = resolve(&store3, &local_dir3, &overrides, &secrets).unwrap();
-            assert_eq!(
-                resolved.connection_url.as_deref(),
-                Some("postgres://env/db")
-            );
+            assert_eq!(resolved.connection_url.as_deref(), Some("postgres://env/db"));
         }
     }
 
@@ -732,15 +705,11 @@ path = "{}"
         // URL should be sqlite://<path> (three slashes for absolute paths)
         assert!(url.starts_with("sqlite://"), "url was: {}", url);
 
-        let mut db = naque_db::Database::connect(&url)
-            .await
-            .expect("connect failed");
+        let mut db = naque_db::Database::connect(&url).await.expect("connect failed");
         db.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, val TEXT)")
             .await
             .expect("CREATE TABLE failed");
-        db.execute("INSERT INTO t (val) VALUES ('hello')")
-            .await
-            .expect("INSERT failed");
+        db.execute("INSERT INTO t (val) VALUES ('hello')").await.expect("INSERT failed");
         let result = db.fetch("SELECT val FROM t").await.expect("SELECT failed");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0].as_deref(), Some("hello"));
@@ -784,15 +753,11 @@ path = "{}"
         let resolved = resolve(&store, &local_dir, &overrides, &secrets).unwrap();
 
         assert_eq!(resolved.active_profile.as_deref(), Some("ghost"));
-        assert_eq!(
-            resolved.connection_url.as_deref(),
-            Some("postgres://env/db")
-        );
+        assert_eq!(resolved.connection_url.as_deref(), Some("postgres://env/db"));
         assert!(resolved
             .warnings
             .iter()
-            .any(|w| w
-                == "active profile 'ghost' not found in profiles; falling back to DATABASE_URL"));
+            .any(|w| w == "active profile 'ghost' not found in profiles; falling back to DATABASE_URL"));
     }
 
     // =========================================================================
@@ -925,13 +890,9 @@ mode = "readonly"
         assert_eq!(detect_provider(&s).as_deref(), Some("openai"));
 
         // Gemini via GEMINI_API_KEY, then GOOGLE_API_KEY.
-        let s = FakeSecrets::new()
-            .with_env("GEMINI_API_KEY", "g")
-            .with_env("HF_TOKEN", "h");
+        let s = FakeSecrets::new().with_env("GEMINI_API_KEY", "g").with_env("HF_TOKEN", "h");
         assert_eq!(detect_provider(&s).as_deref(), Some("gemini"));
-        let s = FakeSecrets::new()
-            .with_env("GOOGLE_API_KEY", "g")
-            .with_env("HF_TOKEN", "h");
+        let s = FakeSecrets::new().with_env("GOOGLE_API_KEY", "g").with_env("HF_TOKEN", "h");
         assert_eq!(detect_provider(&s).as_deref(), Some("gemini"));
 
         // HF_TOKEN last.

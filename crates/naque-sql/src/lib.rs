@@ -88,36 +88,28 @@ fn classify_statement(stmt: &Statement) -> StatementClass {
         | Statement::ShowColumns { .. }
         | Statement::ShowTables { .. }
         | Statement::ShowFunctions { .. } => read("read-only"),
-        Statement::Explain {
-            analyze, statement, ..
-        } => {
+        Statement::Explain { analyze, statement, .. } => {
             if *analyze {
                 classify_statement(statement) // EXPLAIN ANALYZE executes the inner stmt
             } else {
                 read("read-only (explain)")
             }
-        }
+        },
         Statement::Insert(_) => write("WRITE: INSERT", None),
         Statement::Update { selection, .. } => {
             if selection.is_none() {
-                write(
-                    "WRITE: UPDATE (no WHERE)",
-                    Some(CatastrophicReason::UpdateWithoutWhere),
-                )
+                write("WRITE: UPDATE (no WHERE)", Some(CatastrophicReason::UpdateWithoutWhere))
             } else {
                 write("WRITE: UPDATE", None)
             }
-        }
+        },
         Statement::Delete(delete) => {
             if delete.selection.is_none() {
-                write(
-                    "WRITE: DELETE (no WHERE)",
-                    Some(CatastrophicReason::DeleteWithoutWhere),
-                )
+                write("WRITE: DELETE (no WHERE)", Some(CatastrophicReason::DeleteWithoutWhere))
             } else {
                 write("WRITE: DELETE", None)
             }
-        }
+        },
         // Other CREATE* variants (CreateFunction/CreateProcedure/CreateType/...) and uncommon
         // DDL fall through to the Unknown catch-all -- fail-safe (non-read-only, gated), just
         // labeled "Unknown" rather than "DDL".
@@ -135,16 +127,14 @@ fn classify_statement(stmt: &Statement) -> StatementClass {
         Statement::StartTransaction { .. }
         | Statement::Commit { .. }
         | Statement::Rollback { .. }
-        | Statement::Savepoint { .. } => {
-            classed(StatementKind::Transaction, true, "transaction control")
-        }
+        | Statement::Savepoint { .. } => classed(StatementKind::Transaction, true, "transaction control"),
         Statement::Copy { to, .. } => {
             if *to {
                 read("read-only (COPY TO)")
             } else {
                 write("WRITE: COPY FROM", None)
             }
-        }
+        },
         Statement::Merge { .. } => write("WRITE: MERGE", None),
         _ => StatementClass::unknown("unclassified (treated as write)"),
     }
@@ -172,11 +162,7 @@ fn classify_query(query: &sqlparser::ast::Query) -> StatementClass {
 /// True if a `Query` mutates data via its body or any (possibly nested) CTE.
 fn query_is_data_modifying(query: &sqlparser::ast::Query) -> bool {
     if let Some(with) = &query.with {
-        if with
-            .cte_tables
-            .iter()
-            .any(|cte| query_is_data_modifying(&cte.query))
-        {
+        if with.cte_tables.iter().any(|cte| query_is_data_modifying(&cte.query)) {
             return true;
         }
     }
@@ -190,7 +176,7 @@ fn set_expr_is_data_modifying(body: &sqlparser::ast::SetExpr) -> bool {
         SetExpr::Query(q) => query_is_data_modifying(q),
         SetExpr::SetOperation { left, right, .. } => {
             set_expr_is_data_modifying(left) || set_expr_is_data_modifying(right)
-        }
+        },
         // `SELECT ... INTO <table>` creates a table (like CREATE TABLE AS) -- a write.
         SetExpr::Select(s) => s.into.is_some(),
         SetExpr::Values(_) | SetExpr::Table(_) => false,
@@ -202,8 +188,9 @@ fn set_expr_is_data_modifying(body: &sqlparser::ast::SetExpr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use naque_core::{CatastrophicReason, StatementKind};
+
+    use super::*;
 
     #[test]
     fn parse_error_is_fail_safe() {
@@ -223,11 +210,7 @@ mod tests {
 
     fn one(sql: &str) -> StatementClass {
         let r = classify(sql, SqlDialect::Postgres);
-        assert_eq!(
-            r.statements.len(),
-            1,
-            "expected exactly one statement: {sql}"
-        );
+        assert_eq!(r.statements.len(), 1, "expected exactly one statement: {sql}");
         r.statements.into_iter().next().unwrap()
     }
 
@@ -328,10 +311,7 @@ mod tests {
         assert!(c.catastrophic.is_none());
         let c2 = one("DELETE FROM t USING other");
         assert!(!c2.is_read_only);
-        assert_eq!(
-            c2.catastrophic,
-            Some(naque_core::CatastrophicReason::DeleteWithoutWhere)
-        );
+        assert_eq!(c2.catastrophic, Some(naque_core::CatastrophicReason::DeleteWithoutWhere));
     }
 
     #[test]
@@ -401,10 +381,7 @@ mod tests {
         assert_eq!(r.statements.len(), 2);
         assert!(!r.is_read_only());
         assert!(r.any_catastrophic());
-        assert_eq!(
-            r.first_catastrophic(),
-            Some(CatastrophicReason::DeleteWithoutWhere)
-        );
+        assert_eq!(r.first_catastrophic(), Some(CatastrophicReason::DeleteWithoutWhere));
     }
 
     #[test]
@@ -418,10 +395,7 @@ mod tests {
     #[test]
     fn data_modifying_cte_is_not_read_only() {
         let c = one("WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x");
-        assert!(
-            !c.is_read_only,
-            "data-modifying CTE must not be auto-allowed"
-        );
+        assert!(!c.is_read_only, "data-modifying CTE must not be auto-allowed");
     }
 
     #[test]
@@ -434,10 +408,7 @@ mod tests {
     #[test]
     fn select_into_is_not_read_only() {
         let c = one("SELECT * INTO new_table FROM users");
-        assert!(
-            !c.is_read_only,
-            "SELECT INTO creates a table and must not be auto-allowed"
-        );
+        assert!(!c.is_read_only, "SELECT INTO creates a table and must not be auto-allowed");
     }
 
     #[test]

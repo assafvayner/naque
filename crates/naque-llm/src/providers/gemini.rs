@@ -1,6 +1,5 @@
-use crate::{LlmError, LlmRequest, LlmResponse};
-
 use super::openai::openai_chat_completion;
+use crate::{LlmError, LlmRequest, LlmResponse};
 
 /// Google Gemini via its OpenAI-compatible endpoint.
 ///
@@ -19,9 +18,7 @@ impl GeminiProvider {
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
         Self {
             api_key,
-            base_url: base_url.unwrap_or_else(|| {
-                "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
-            }),
+            base_url: base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta/openai".to_string()),
             client: reqwest::Client::builder()
                 .user_agent(concat!("naque/", env!("CARGO_PKG_VERSION")))
                 .build()

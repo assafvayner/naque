@@ -60,16 +60,14 @@ fn parse_args() -> Result<Args, String> {
             "--url" => {
                 i += 1;
                 url = Some(raw.get(i).ok_or("--url requires a value")?.clone());
-            }
+            },
             "--mode" => {
                 i += 1;
                 let s = raw.get(i).ok_or("--mode requires a value")?;
-                mode =
-                    s.parse()
-                        .map_err(|e: naque_core::permission::ParsePermissionModeError| {
-                            format!("invalid --mode: {e}")
-                        })?;
-            }
+                mode = s
+                    .parse()
+                    .map_err(|e: naque_core::permission::ParsePermissionModeError| format!("invalid --mode: {e}"))?;
+            },
             "--approve" => {
                 i += 1;
                 let s = raw.get(i).ok_or("--approve requires yes|no")?;
@@ -78,17 +76,17 @@ fn parse_args() -> Result<Args, String> {
                     "no" => false,
                     other => return Err(format!("--approve must be yes or no, got {other:?}")),
                 };
-            }
+            },
             "--model" => {
                 i += 1;
                 model = raw.get(i).ok_or("--model requires a value")?.clone();
-            }
+            },
             "--no-guard" => {
                 guard = false;
-            }
+            },
             "--no-learn" => {
                 learn = false;
-            }
+            },
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -125,10 +123,7 @@ fn print_result(result: Option<&naque_db::QueryResult>) {
     println!("  columns: {}", headers.join(" | "));
     println!("  row count: {}", r.rows.len());
     for row in r.rows.iter().take(8) {
-        let cells: Vec<String> = row
-            .iter()
-            .map(|v| v.as_deref().unwrap_or("NULL").to_string())
-            .collect();
+        let cells: Vec<String> = row.iter().map(|v| v.as_deref().unwrap_or("NULL").to_string()).collect();
         println!("    {}", cells.join(" | "));
     }
     if r.rows.len() > 8 {
@@ -161,7 +156,7 @@ fn main() {
                  [--approve yes|no] [--model <id>] [--no-guard] [--no-learn]"
             );
             std::process::exit(1);
-        }
+        },
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -182,7 +177,7 @@ async fn run(args: Args) {
         Err(e) => {
             eprintln!("database connect failed: {e}");
             std::process::exit(1);
-        }
+        },
     };
     println!("connected.");
 
@@ -193,7 +188,7 @@ async fn run(args: Args) {
             eprintln!("provider error: {e}");
             eprintln!("hint: set HF_TOKEN before running");
             std::process::exit(1);
-        }
+        },
     };
 
     // 3. Build agent.

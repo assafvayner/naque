@@ -160,12 +160,7 @@ impl SchemaModel {
                     // Look for a doc that mentions the table name.
                     self.docs.iter().find_map(|doc| {
                         if doc.content.contains(&table.name) {
-                            let summary = doc
-                                .content
-                                .lines()
-                                .find(|l| l.contains(&table.name))?
-                                .trim()
-                                .to_owned();
+                            let summary = doc.content.lines().find(|l| l.contains(&table.name))?.trim().to_owned();
                             if summary.len() > 80 {
                                 Some(format!("{}…", &summary[..80]))
                             } else {
@@ -212,15 +207,8 @@ impl SchemaModel {
         for col in &table.columns {
             let pk_flag = if col.primary_key { " [PK]" } else { "" };
             let null_flag = if col.nullable { "" } else { " NOT NULL" };
-            let default_str = col
-                .default
-                .as_deref()
-                .map(|d| format!(" DEFAULT {}", d))
-                .unwrap_or_default();
-            out.push_str(&format!(
-                "  {}: {}{}{}{}\n",
-                col.name, col.data_type, pk_flag, null_flag, default_str
-            ));
+            let default_str = col.default.as_deref().map(|d| format!(" DEFAULT {}", d)).unwrap_or_default();
+            out.push_str(&format!("  {}: {}{}{}{}\n", col.name, col.data_type, pk_flag, null_flag, default_str));
         }
 
         if !table.foreign_keys.is_empty() {
@@ -239,12 +227,7 @@ impl SchemaModel {
             out.push_str("Indexes:\n");
             for idx in &table.indexes {
                 let unique = if idx.unique { "UNIQUE " } else { "" };
-                out.push_str(&format!(
-                    "  {} {}({})\n",
-                    idx.name,
-                    unique,
-                    idx.columns.join(", ")
-                ));
+                out.push_str(&format!("  {} {}({})\n", idx.name, unique, idx.columns.join(", ")));
             }
         }
 

@@ -141,14 +141,8 @@ password_env = "STAGING_DB_PW"
         // Fields from profiles.toml
         let profiles = merged.profiles.as_ref().unwrap();
         let staging = profiles.get("staging").unwrap();
-        assert_eq!(
-            staging.connection.host.as_deref(),
-            Some("staging.db.internal")
-        );
+        assert_eq!(staging.connection.host.as_deref(), Some("staging.db.internal"));
         assert_eq!(staging.connection.user.as_deref(), Some("naque"));
-        assert_eq!(
-            staging.connection.password_env.as_deref(),
-            Some("STAGING_DB_PW")
-        );
+        assert_eq!(staging.connection.password_env.as_deref(), Some("STAGING_DB_PW"));
     }
 }

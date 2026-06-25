@@ -10,8 +10,9 @@ pub use model::{ColumnInfo, DocEntry, ForeignKey, IndexInfo, SchemaModel, TableI
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -120,19 +121,11 @@ mod tests {
             path: "README.md".to_owned(),
             content: "Some documentation about orders and users.".to_owned(),
         }]);
-        assert_eq!(
-            m.fingerprint(),
-            fp_before,
-            "docs must not affect fingerprint"
-        );
+        assert_eq!(m.fingerprint(), fp_before, "docs must not affect fingerprint");
 
         // Change a description.
         m.tables[0].description = Some("Now has a description".to_owned());
-        assert_eq!(
-            m.fingerprint(),
-            fp_before,
-            "description must not affect fingerprint"
-        );
+        assert_eq!(m.fingerprint(), fp_before, "description must not affect fingerprint");
     }
 
     #[test]
@@ -148,11 +141,7 @@ mod tests {
             default: None,
             primary_key: false,
         });
-        assert_ne!(
-            m2.fingerprint(),
-            fp_before,
-            "adding a column must change fingerprint"
-        );
+        assert_ne!(m2.fingerprint(), fp_before, "adding a column must change fingerprint");
     }
 
     #[test]
@@ -162,11 +151,7 @@ mod tests {
 
         let mut m2 = m.clone();
         m2.tables[0].columns[1].data_type = "varchar(255)".to_owned();
-        assert_ne!(
-            m2.fingerprint(),
-            fp_before,
-            "changing column type must change fingerprint"
-        );
+        assert_ne!(m2.fingerprint(), fp_before, "changing column type must change fingerprint");
     }
 
     #[test]
@@ -177,20 +162,12 @@ mod tests {
         // users.email has default None; set a default.
         let mut m2 = m.clone();
         m2.tables[0].columns[1].default = Some("'unknown@example.com'".to_owned());
-        assert_ne!(
-            m2.fingerprint(),
-            fp_before,
-            "changing a column default must change fingerprint"
-        );
+        assert_ne!(m2.fingerprint(), fp_before, "changing a column default must change fingerprint");
 
         // Also: changing an existing default value must change the fingerprint.
         let mut m3 = m.clone();
         m3.tables[0].columns[0].default = Some("nextval('other_seq')".to_owned());
-        assert_ne!(
-            m3.fingerprint(),
-            fp_before,
-            "altering an existing default must change fingerprint"
-        );
+        assert_ne!(m3.fingerprint(), fp_before, "altering an existing default must change fingerprint");
     }
 
     #[test]
@@ -201,20 +178,12 @@ mod tests {
         // Reverse table order.
         let mut m2 = m.clone();
         m2.tables.reverse();
-        assert_eq!(
-            m2.fingerprint(),
-            fp,
-            "reversing table order must not change fingerprint"
-        );
+        assert_eq!(m2.fingerprint(), fp, "reversing table order must not change fingerprint");
 
         // Reverse column order in users table.
         let mut m3 = m.clone();
         m3.tables[0].columns.reverse();
-        assert_eq!(
-            m3.fingerprint(),
-            fp,
-            "reversing column order must not change fingerprint"
-        );
+        assert_eq!(m3.fingerprint(), fp, "reversing column order must not change fingerprint");
     }
 
     // ── 3. compact_catalog ─────────────────────────────────────────────────────
@@ -223,19 +192,10 @@ mod tests {
     fn compact_catalog_lists_both_tables() {
         let m = make_model();
         let catalog = m.compact_catalog();
-        assert!(
-            catalog.contains("users"),
-            "catalog must mention 'users': {catalog}"
-        );
-        assert!(
-            catalog.contains("orders"),
-            "catalog must mention 'orders': {catalog}"
-        );
+        assert!(catalog.contains("users"), "catalog must mention 'users': {catalog}");
+        assert!(catalog.contains("orders"), "catalog must mention 'orders': {catalog}");
         // Should not dump full column detail (i.e., no per-column type lines).
-        assert!(
-            !catalog.contains("nextval("),
-            "catalog must not include column defaults: {catalog}"
-        );
+        assert!(!catalog.contains("nextval("), "catalog must not include column defaults: {catalog}");
     }
 
     #[test]
@@ -252,10 +212,7 @@ mod tests {
         let m = make_model();
         let catalog = m.compact_catalog();
         // orders has a description.
-        assert!(
-            catalog.contains("Customer purchase records"),
-            "catalog must include order description: {catalog}"
-        );
+        assert!(catalog.contains("Customer purchase records"), "catalog must include order description: {catalog}");
     }
 
     #[test]
@@ -268,10 +225,7 @@ mod tests {
 
         // Must not panic.
         let catalog = m.compact_catalog();
-        assert!(
-            catalog.contains('…'),
-            "long description should be truncated with an ellipsis: {catalog}"
-        );
+        assert!(catalog.contains('…'), "long description should be truncated with an ellipsis: {catalog}");
     }
 
     // ── 4. describe_table ──────────────────────────────────────────────────────
@@ -279,9 +233,7 @@ mod tests {
     #[test]
     fn describe_table_found_by_qualified_name() {
         let m = make_model();
-        let detail = m
-            .describe_table("public.orders")
-            .expect("should find orders");
+        let detail = m.describe_table("public.orders").expect("should find orders");
         // Contains column names and types.
         assert!(detail.contains("user_id"), "should list user_id column");
         assert!(detail.contains("bigint"), "should list bigint type");
@@ -335,9 +287,7 @@ mod tests {
         let m = make_model();
 
         save_schema(dir.path(), &m).expect("save");
-        let loaded = load_schema(dir.path())
-            .expect("load")
-            .expect("should be Some");
+        let loaded = load_schema(dir.path()).expect("load").expect("should be Some");
         assert_eq!(m, loaded);
 
         let fp = cached_fingerprint(dir.path()).expect("fingerprint file");

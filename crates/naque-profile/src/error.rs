@@ -6,10 +6,7 @@ pub enum ConfigError {
     Io(String),
 
     #[error("toml parse error in {path}: {source}")]
-    Parse {
-        path: String,
-        source: toml::de::Error,
-    },
+    Parse { path: String, source: toml::de::Error },
 
     #[error("{0}")]
     Other(String),

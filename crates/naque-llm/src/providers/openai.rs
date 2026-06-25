@@ -21,8 +21,8 @@ impl OpenAIProvider {
     }
 
     pub fn from_env() -> Result<Self, LlmError> {
-        let key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| LlmError::Provider("OPENAI_API_KEY not set".to_string()))?;
+        let key =
+            std::env::var("OPENAI_API_KEY").map_err(|_| LlmError::Provider("OPENAI_API_KEY not set".to_string()))?;
         Ok(Self::new(key, None))
     }
 
@@ -112,23 +112,13 @@ pub(crate) fn openai_parse_response(json: &Value) -> Result<LlmResponse, LlmErro
         })
         .unwrap_or_default();
 
-    let stop_reason = choice
-        .get("finish_reason")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let stop_reason = choice.get("finish_reason").and_then(Value::as_str).unwrap_or("").to_string();
 
     let usage = {
         let u = json.get("usage");
         Usage {
-            input_tokens: u
-                .and_then(|v| v.get("prompt_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            output_tokens: u
-                .and_then(|v| v.get("completion_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            input_tokens: u.and_then(|v| v.get("prompt_tokens")).and_then(Value::as_u64).unwrap_or(0),
+            output_tokens: u.and_then(|v| v.get("completion_tokens")).and_then(Value::as_u64).unwrap_or(0),
         }
     };
 
@@ -162,10 +152,7 @@ pub(crate) async fn openai_chat_completion(
         .map_err(|e| LlmError::Provider(e.to_string()))?;
 
     let status = resp.status();
-    let json: Value = resp
-        .json()
-        .await
-        .map_err(|e| LlmError::Provider(e.to_string()))?;
+    let json: Value = resp.json().await.map_err(|e| LlmError::Provider(e.to_string()))?;
 
     if !status.is_success() {
         let msg = json
@@ -191,8 +178,7 @@ pub(crate) fn map_message(msg: &Message) -> Value {
                 let tc: Vec<Value> = tool_calls
                     .iter()
                     .map(|call| {
-                        let arguments =
-                            serde_json::to_string(&call.input).unwrap_or_else(|_| "{}".to_string());
+                        let arguments = serde_json::to_string(&call.input).unwrap_or_else(|_| "{}".to_string());
                         json!({
                             "id": call.id,
                             "type": "function",
@@ -206,18 +192,16 @@ pub(crate) fn map_message(msg: &Message) -> Value {
                 obj["tool_calls"] = Value::Array(tc);
             }
             obj
-        }
+        },
         Message::ToolResult {
-            tool_use_id,
-            content,
-            ..
+            tool_use_id, content, ..
         } => {
             json!({
                 "role": "tool",
                 "tool_call_id": tool_use_id,
                 "content": content,
             })
-        }
+        },
     }
 }
 

@@ -19,8 +19,9 @@ pub fn find_naque_toml(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     #[test]
     fn finds_naque_toml_in_ancestor() {

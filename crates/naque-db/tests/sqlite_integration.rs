@@ -19,23 +19,11 @@ fn tempfile_url() -> (NamedTempFile, String) {
 
 #[test]
 fn engine_from_url_mapping() {
-    assert_eq!(
-        Engine::from_url("postgres://localhost/db").unwrap(),
-        Engine::Postgres
-    );
-    assert_eq!(
-        Engine::from_url("postgresql://user:pass@host/db").unwrap(),
-        Engine::Postgres,
-    );
+    assert_eq!(Engine::from_url("postgres://localhost/db").unwrap(), Engine::Postgres);
+    assert_eq!(Engine::from_url("postgresql://user:pass@host/db").unwrap(), Engine::Postgres,);
     assert_eq!(Engine::from_url("sqlite::memory:").unwrap(), Engine::Sqlite);
-    assert_eq!(
-        Engine::from_url("sqlite://./foo.db").unwrap(),
-        Engine::Sqlite
-    );
-    assert_eq!(
-        Engine::from_url("file:///tmp/foo.db").unwrap(),
-        Engine::Sqlite
-    );
+    assert_eq!(Engine::from_url("sqlite://./foo.db").unwrap(), Engine::Sqlite);
+    assert_eq!(Engine::from_url("file:///tmp/foo.db").unwrap(), Engine::Sqlite);
 
     assert!(Engine::from_url("mysql://localhost/db").is_err());
     assert!(Engine::from_url("garbage").is_err());
@@ -79,10 +67,7 @@ async fn fetch_columns_and_nulls() {
         .await
         .expect("INSERT");
 
-    let result = db
-        .fetch("SELECT id, name, score FROM t ORDER BY id")
-        .await
-        .expect("SELECT");
+    let result = db.fetch("SELECT id, name, score FROM t ORDER BY id").await.expect("SELECT");
 
     // Columns
     assert_eq!(result.columns.len(), 3);
@@ -127,15 +112,10 @@ async fn readonly_enforcement() {
     assert_eq!(result.rows.len(), 1);
 
     // Write on readonly connection must be rejected by SQLite.
-    let err = db
-        .execute_readonly("INSERT INTO t VALUES (3,'c',3.0)")
-        .await;
-    assert!(
-        err.is_err(),
-        "INSERT on readonly connection must return Err, got: {err:?}"
-    );
+    let err = db.execute_readonly("INSERT INTO t VALUES (3,'c',3.0)").await;
+    assert!(err.is_err(), "INSERT on readonly connection must return Err, got: {err:?}");
     match err.unwrap_err() {
-        DbError::Query(_) => {} // expected
+        DbError::Query(_) => {}, // expected
         other => panic!("expected DbError::Query, got: {other:?}"),
     }
 }
@@ -150,9 +130,7 @@ async fn reconnect_resets_session() {
     let mut db = Database::connect(&url).await.expect("connect");
 
     // Create a temp table on the primary connection.
-    db.execute("CREATE TEMP TABLE tmp(x INTEGER)")
-        .await
-        .expect("CREATE TEMP TABLE");
+    db.execute("CREATE TEMP TABLE tmp(x INTEGER)").await.expect("CREATE TEMP TABLE");
 
     // Verify it exists.
     db.fetch("SELECT * FROM tmp")
@@ -164,8 +142,5 @@ async fn reconnect_resets_session() {
 
     // After reconnect the temp table should be gone.
     let err = db.fetch("SELECT * FROM tmp").await;
-    assert!(
-        err.is_err(),
-        "SELECT on dropped temp table should error after reconnect, got: {err:?}"
-    );
+    assert!(err.is_err(), "SELECT on dropped temp table should error after reconnect, got: {err:?}");
 }

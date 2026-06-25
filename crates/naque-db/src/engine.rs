@@ -30,27 +30,15 @@ mod tests {
 
     #[test]
     fn postgres_schemes() {
-        assert_eq!(
-            Engine::from_url("postgres://localhost/db").unwrap(),
-            Engine::Postgres
-        );
-        assert_eq!(
-            Engine::from_url("postgresql://user:pass@host/db").unwrap(),
-            Engine::Postgres
-        );
+        assert_eq!(Engine::from_url("postgres://localhost/db").unwrap(), Engine::Postgres);
+        assert_eq!(Engine::from_url("postgresql://user:pass@host/db").unwrap(), Engine::Postgres);
     }
 
     #[test]
     fn sqlite_schemes() {
         assert_eq!(Engine::from_url("sqlite::memory:").unwrap(), Engine::Sqlite);
-        assert_eq!(
-            Engine::from_url("sqlite://./foo.db").unwrap(),
-            Engine::Sqlite
-        );
-        assert_eq!(
-            Engine::from_url("file:///tmp/foo.db").unwrap(),
-            Engine::Sqlite
-        );
+        assert_eq!(Engine::from_url("sqlite://./foo.db").unwrap(), Engine::Sqlite);
+        assert_eq!(Engine::from_url("file:///tmp/foo.db").unwrap(), Engine::Sqlite);
     }
 
     #[test]

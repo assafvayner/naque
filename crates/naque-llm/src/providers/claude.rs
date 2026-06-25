@@ -62,23 +62,15 @@ impl ClaudeProvider {
                     if let Some(t) = block.get("text").and_then(Value::as_str) {
                         text_parts.push(t);
                     }
-                }
+                },
                 Some("tool_use") => {
-                    let id = block
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let name = block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("").to_string();
                     let input = block.get("input").cloned().unwrap_or(Value::Null);
                     tool_calls.push(ToolCall { id, name, input });
-                }
+                },
                 // Ignore "thinking" and any other block types.
-                _ => {}
+                _ => {},
             }
         }
 
@@ -88,23 +80,13 @@ impl ClaudeProvider {
             Some(text_parts.join(""))
         };
 
-        let stop_reason = json
-            .get("stop_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let stop_reason = json.get("stop_reason").and_then(Value::as_str).unwrap_or("").to_string();
 
         let usage = {
             let u = json.get("usage");
             Usage {
-                input_tokens: u
-                    .and_then(|v| v.get("input_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                output_tokens: u
-                    .and_then(|v| v.get("output_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
+                input_tokens: u.and_then(|v| v.get("input_tokens")).and_then(Value::as_u64).unwrap_or(0),
+                output_tokens: u.and_then(|v| v.get("output_tokens")).and_then(Value::as_u64).unwrap_or(0),
             }
         };
 
@@ -136,7 +118,7 @@ fn map_message(msg: &Message) -> Value {
                 }));
             }
             json!({ "role": "assistant", "content": content })
-        }
+        },
         Message::ToolResult {
             tool_use_id,
             content,
@@ -151,7 +133,7 @@ fn map_message(msg: &Message) -> Value {
                     "is_error": is_error,
                 }]
             })
-        }
+        },
     }
 }
 
@@ -177,10 +159,7 @@ impl crate::LlmProvider for ClaudeProvider {
             .map_err(|e| LlmError::Provider(e.to_string()))?;
 
         let status = resp.status();
-        let json: Value = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::Provider(e.to_string()))?;
+        let json: Value = resp.json().await.map_err(|e| LlmError::Provider(e.to_string()))?;
 
         if !status.is_success() {
             let msg = json

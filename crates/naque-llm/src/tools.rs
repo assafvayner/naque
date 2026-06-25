@@ -1,5 +1,6 @@
-use crate::ToolDef;
 use serde_json::json;
+
+use crate::ToolDef;
 
 /// Returns the standard set of tools the agent may call.
 ///
@@ -56,8 +57,7 @@ pub fn standard_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "run_query".to_string(),
-            description: "Execute a read-only SQL query and return the results as formatted text."
-                .to_string(),
+            description: "Execute a read-only SQL query and return the results as formatted text.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
