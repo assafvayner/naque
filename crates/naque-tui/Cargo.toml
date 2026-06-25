@@ -1,0 +1,10 @@
+[package]
+name = "naque-tui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+naque-core = { path = "../naque-core" }
+ratatui = "0.29"
+serde_json = "1"
