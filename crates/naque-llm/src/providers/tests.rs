@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::openai::{openai_build_body, openai_parse_response};
 use crate::{

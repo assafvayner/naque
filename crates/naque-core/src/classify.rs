@@ -136,14 +136,18 @@ mod tests {
             catastrophic: None,
             label: "WRITE".into(),
         };
-        assert!(ClassifyResult {
-            statements: vec![read.clone()]
-        }
-        .is_read_only());
-        assert!(!ClassifyResult {
-            statements: vec![read, write]
-        }
-        .is_read_only());
+        assert!(
+            ClassifyResult {
+                statements: vec![read.clone()]
+            }
+            .is_read_only()
+        );
+        assert!(
+            !ClassifyResult {
+                statements: vec![read, write]
+            }
+            .is_read_only()
+        );
     }
 
     #[test]

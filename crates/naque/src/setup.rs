@@ -1,6 +1,6 @@
 //! Wires CLI args → profile resolution → App + Theme.
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use naque::App;
 use naque_core::PermissionMode;
 use naque_db::Database;
@@ -85,14 +85,14 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
             Box::new(p)
         },
         Some(other) => {
-            return Err(anyhow!("unknown provider {other:?}; expected one of: claude, openai, gemini, hf, ollama"))
+            return Err(anyhow!("unknown provider {other:?}; expected one of: claude, openai, gemini, hf, ollama"));
         },
         None => {
             return Err(anyhow!(
                 "no AI provider configured and no known API key found — set one of \
                  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or HF_TOKEN, \
                  or set `provider` in your config/profile or pass --provider"
-            ))
+            ));
         },
     };
 

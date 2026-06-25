@@ -1,8 +1,8 @@
 //! High-level [`Database`] handle with primary + read-only connections.
 
+use sqlx::Connection;
 use sqlx::postgres::PgConnection;
 use sqlx::sqlite::SqliteConnection;
-use sqlx::Connection;
 
 use crate::conn::Conn;
 use crate::engine::Engine;

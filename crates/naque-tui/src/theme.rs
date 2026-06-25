@@ -42,11 +42,7 @@ impl Theme {
     pub fn classification_style(&self, kind: StatementKind, catastrophic: bool) -> Style {
         if catastrophic {
             let base = Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED);
-            if self.color {
-                base.fg(Color::Red)
-            } else {
-                base
-            }
+            if self.color { base.fg(Color::Red) } else { base }
         } else if self.color {
             let color = match kind {
                 StatementKind::Read => Color::Green,
@@ -102,11 +98,7 @@ impl Theme {
     /// Always `REVERSED`; adds a color tint when color is enabled.
     pub fn selected_style(&self) -> Style {
         let base = Style::default().add_modifier(Modifier::REVERSED);
-        if self.color {
-            base.fg(Color::Cyan)
-        } else {
-            base
-        }
+        if self.color { base.fg(Color::Cyan) } else { base }
     }
 }
 
@@ -289,15 +281,15 @@ mod tests {
     #[test]
     fn detect_color_false_when_no_color_set() {
         // Serialize env access to avoid data races with other tests.
-        std::env::set_var("NO_COLOR", "1");
+        unsafe { std::env::set_var("NO_COLOR", "1") };
         let theme = Theme::detect();
-        std::env::remove_var("NO_COLOR");
+        unsafe { std::env::remove_var("NO_COLOR") };
         assert!(!theme.color);
     }
 
     #[test]
     fn detect_color_true_when_no_color_absent() {
-        std::env::remove_var("NO_COLOR");
+        unsafe { std::env::remove_var("NO_COLOR") };
         // Only valid if NO_COLOR is truly absent; guard against other tests.
         if std::env::var_os("NO_COLOR").is_none() {
             assert!(Theme::detect().color);

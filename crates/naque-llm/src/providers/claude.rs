@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{LlmError, LlmRequest, LlmResponse, Message, ToolCall, Usage};
 
@@ -104,10 +104,10 @@ fn map_message(msg: &Message) -> Value {
         Message::User(s) => json!({ "role": "user", "content": s }),
         Message::Assistant { text, tool_calls } => {
             let mut content: Vec<Value> = Vec::new();
-            if let Some(t) = text {
-                if !t.is_empty() {
-                    content.push(json!({ "type": "text", "text": t }));
-                }
+            if let Some(t) = text
+                && !t.is_empty()
+            {
+                content.push(json!({ "type": "text", "text": t }));
             }
             for call in tool_calls {
                 content.push(json!({

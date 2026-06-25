@@ -378,17 +378,16 @@ async fn introspect_postgres(db: &mut Database) -> Result<SchemaModel, SchemaErr
 /// is acceptable.
 fn parse_index_columns(indexdef: &str) -> Vec<String> {
     // Find the last '(' ... ')' in the def.
-    if let Some(open) = indexdef.rfind('(') {
-        if let Some(close) = indexdef.rfind(')') {
-            if close > open {
-                let inner = &indexdef[open + 1..close];
-                return inner
-                    .split(',')
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
-        }
+    if let Some(open) = indexdef.rfind('(')
+        && let Some(close) = indexdef.rfind(')')
+        && close > open
+    {
+        let inner = &indexdef[open + 1..close];
+        return inner
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
     vec![]
 }

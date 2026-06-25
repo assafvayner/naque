@@ -29,10 +29,10 @@ fn help_color() -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
-    if let Some(force) = std::env::var_os("CLICOLOR_FORCE") {
-        if force != "0" {
-            return true;
-        }
+    if let Some(force) = std::env::var_os("CLICOLOR_FORCE")
+        && force != "0"
+    {
+        return true;
     }
     std::io::stdout().is_terminal()
 }

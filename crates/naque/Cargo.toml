@@ -1,8 +1,16 @@
 [package]
 name = "naque"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+description = "Agentic AI query tool over databases — natural-language to SQL in your terminal, with a hard read-only safety boundary"
+keywords = ["sql", "database", "ai", "agent", "tui"]
+categories = ["command-line-utilities", "database"]
 
 [lib]
 name = "naque"

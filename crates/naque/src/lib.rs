@@ -7,10 +7,10 @@ pub mod ui;
 
 pub use app::{App, AppError, TranscriptEntry};
 pub use approval::{ApprovalDecision, Approver, AutoApprove, AutoReject, ScriptedApprover};
-use naque_core::gate::{gate_decision, GateDecision, QueryKind};
 use naque_core::PermissionMode;
+use naque_core::gate::{GateDecision, QueryKind, gate_decision};
 use naque_db::{Database, Engine, QueryResult};
-use naque_sql::{classify, SqlDialect};
+use naque_sql::{SqlDialect, classify};
 
 use crate::approval::ApprovalDecision as AD;
 

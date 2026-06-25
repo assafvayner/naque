@@ -47,10 +47,10 @@ impl QueryToolExecutor<'_> {
             return Ok(format!("error: invalid table name {name:?}"));
         }
 
-        if let Some(schema) = self.schema {
-            if let Some(description) = schema.describe_table(name) {
-                return Ok(description);
-            }
+        if let Some(schema) = self.schema
+            && let Some(description) = schema.describe_table(name)
+        {
+            return Ok(description);
         }
 
         // Fall back to a live introspection query.
@@ -141,10 +141,10 @@ fn is_safe_identifier(name: &str) -> bool {
 
 /// Render a `QueryResult` to a compact text table for the agent to read.
 pub fn format_result_text(result: &QueryResult) -> String {
-    if let Some(n) = result.rows_affected {
-        if result.rows.is_empty() {
-            return format!("{n} row(s) affected");
-        }
+    if let Some(n) = result.rows_affected
+        && result.rows.is_empty()
+    {
+        return format!("{n} row(s) affected");
     }
 
     if result.columns.is_empty() && result.rows.is_empty() {

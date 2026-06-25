@@ -3,9 +3,14 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-edition = "2021"
-license = "MIT OR Apache-2.0"
-rust-version = "1.79"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+version = "0.1.0"
+authors = ["Assaf Vayner <assafvayner@gmail.com>"]
+repository = "https://github.com/assafvayner/naque"
+readme = "README.md"
+publish = false
 
 [workspace.dependencies]
 anyhow = "1"

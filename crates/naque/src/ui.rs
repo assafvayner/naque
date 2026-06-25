@@ -6,9 +6,9 @@ use anyhow::Context;
 use naque_core::gate::GateDecision;
 use naque_tui::{ApprovalChoice, ApprovalPrompt, ResultTable, StatusBar, Theme};
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::crossterm::ExecutableCommand;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -617,8 +617,8 @@ mod tests {
     use naque_core::PermissionMode;
     use naque_llm::{AgentConfig, MockProvider};
     use naque_tui::ApprovalPrompt;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tempfile::NamedTempFile;
 
     use super::*;

@@ -1,8 +1,15 @@
 [package]
 name = "naque-llm"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "LLM provider abstraction and agent loop for naque"
+keywords = ["llm", "ai", "agent", "openai", "naque"]
+categories = ["api-bindings"]
 
 [dependencies]
 serde.workspace = true

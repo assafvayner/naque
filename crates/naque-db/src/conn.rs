@@ -42,8 +42,8 @@ impl Conn {
 // ---------------------------------------------------------------------------
 
 async fn fetch_pg(conn: &mut PgConnection, sql: &str) -> Result<QueryResult, DbError> {
-    use sqlx::postgres::PgRow;
     use sqlx::Row as _;
+    use sqlx::postgres::PgRow;
 
     let rows: Vec<PgRow> = sqlx::query(sql)
         .fetch_all(conn)
@@ -121,28 +121,28 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
         }
     }
 
-    if tn == "bool" || tn == "boolean" {
-        if let Ok(v) = row.try_get::<bool, _>(i) {
-            return Some(v.to_string());
-        }
+    if (tn == "bool" || tn == "boolean")
+        && let Ok(v) = row.try_get::<bool, _>(i)
+    {
+        return Some(v.to_string());
     }
 
-    if tn == "uuid" {
-        if let Ok(v) = row.try_get::<sqlx::types::Uuid, _>(i) {
-            return Some(v.to_string());
-        }
+    if tn == "uuid"
+        && let Ok(v) = row.try_get::<sqlx::types::Uuid, _>(i)
+    {
+        return Some(v.to_string());
     }
 
-    if tn == "json" || tn == "jsonb" {
-        if let Ok(v) = row.try_get::<sqlx::types::JsonValue, _>(i) {
-            return Some(v.to_string());
-        }
+    if (tn == "json" || tn == "jsonb")
+        && let Ok(v) = row.try_get::<sqlx::types::JsonValue, _>(i)
+    {
+        return Some(v.to_string());
     }
 
-    if tn == "numeric" || tn == "decimal" {
-        if let Ok(v) = row.try_get::<sqlx::types::BigDecimal, _>(i) {
-            return Some(v.to_string());
-        }
+    if (tn == "numeric" || tn == "decimal")
+        && let Ok(v) = row.try_get::<sqlx::types::BigDecimal, _>(i)
+    {
+        return Some(v.to_string());
     }
 
     if tn.contains("timestamp") {
@@ -153,22 +153,22 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
             return Some(v.to_string());
         }
     }
-    if tn == "date" {
-        if let Ok(v) = row.try_get::<sqlx::types::chrono::NaiveDate, _>(i) {
-            return Some(v.to_string());
-        }
+    if tn == "date"
+        && let Ok(v) = row.try_get::<sqlx::types::chrono::NaiveDate, _>(i)
+    {
+        return Some(v.to_string());
     }
-    if tn == "time" || tn == "timetz" {
-        if let Ok(v) = row.try_get::<sqlx::types::chrono::NaiveTime, _>(i) {
-            return Some(v.to_string());
-        }
+    if (tn == "time" || tn == "timetz")
+        && let Ok(v) = row.try_get::<sqlx::types::chrono::NaiveTime, _>(i)
+    {
+        return Some(v.to_string());
     }
 
     // Bytea → hex string
-    if tn == "bytea" {
-        if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
-            return Some(bytes_to_hex(&v));
-        }
+    if tn == "bytea"
+        && let Ok(v) = row.try_get::<Vec<u8>, _>(i)
+    {
+        return Some(bytes_to_hex(&v));
     }
 
     // Generic string (text, varchar, char, citext, etc.)

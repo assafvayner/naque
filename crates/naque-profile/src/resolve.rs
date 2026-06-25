@@ -754,10 +754,12 @@ path = "{}"
 
         assert_eq!(resolved.active_profile.as_deref(), Some("ghost"));
         assert_eq!(resolved.connection_url.as_deref(), Some("postgres://env/db"));
-        assert!(resolved
-            .warnings
-            .iter()
-            .any(|w| w == "active profile 'ghost' not found in profiles; falling back to DATABASE_URL"));
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w == "active profile 'ghost' not found in profiles; falling back to DATABASE_URL")
+        );
     }
 
     // =========================================================================

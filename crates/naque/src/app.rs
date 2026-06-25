@@ -1,15 +1,15 @@
 //! Headless engine — routes input, gates SQL, drives the LLM agent.
 
-use naque_core::gate::QueryKind;
 use naque_core::PermissionMode;
+use naque_core::gate::QueryKind;
 use naque_db::{Database, Engine, QueryResult};
 use naque_llm::{Agent, Usage};
 use naque_schema::SchemaModel;
-use naque_sql::{classify, SqlDialect};
-use naque_tui::{route_input, Input};
+use naque_sql::{SqlDialect, classify};
+use naque_tui::{Input, route_input};
 
 use crate::approval::Approver;
-use crate::executor::{format_result_text, QueryToolExecutor};
+use crate::executor::{QueryToolExecutor, format_result_text};
 use crate::run_gated;
 
 // ---------------------------------------------------------------------------
@@ -425,8 +425,8 @@ pub mod tests {
     use naque_llm::{AgentConfig, LlmResponse, MockProvider, ToolCall, Usage as LlmUsage};
 
     use super::*;
-    use crate::approval::{AutoApprove, AutoReject, ScriptedApprover};
     use crate::ApprovalDecision;
+    use crate::approval::{AutoApprove, AutoReject, ScriptedApprover};
 
     // ------------------------------------------------------------------
     // Helpers

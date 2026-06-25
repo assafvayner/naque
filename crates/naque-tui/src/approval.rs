@@ -8,8 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::picker::{Picker, PickerOption, PickerOutcome};
 use crate::Theme;
+use crate::picker::{Picker, PickerOption, PickerOutcome};
 
 /// The user's decision from the approval prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

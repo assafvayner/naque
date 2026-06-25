@@ -15,8 +15,8 @@ use naque_core::{CatastrophicReason, GateDecision, PermissionMode};
 use naque_db::Database;
 use naque_llm::{Agent, AgentConfig, LlmResponse, MockProvider, Usage};
 use naque_tui::{ApprovalPrompt, StatusBar, Theme};
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 // ---------------------------------------------------------------------------
 // Main

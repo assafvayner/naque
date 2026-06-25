@@ -161,10 +161,10 @@ fn classify_query(query: &sqlparser::ast::Query) -> StatementClass {
 
 /// True if a `Query` mutates data via its body or any (possibly nested) CTE.
 fn query_is_data_modifying(query: &sqlparser::ast::Query) -> bool {
-    if let Some(with) = &query.with {
-        if with.cte_tables.iter().any(|cte| query_is_data_modifying(&cte.query)) {
-            return true;
-        }
+    if let Some(with) = &query.with
+        && with.cte_tables.iter().any(|cte| query_is_data_modifying(&cte.query))
+    {
+        return true;
     }
     set_expr_is_data_modifying(&query.body)
 }
