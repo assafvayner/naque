@@ -1,0 +1,32 @@
+[package]
+name = "naque"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "naque"
+path = "src/lib.rs"
+
+[[bin]]
+name = "naque"
+path = "src/main.rs"
+
+[dependencies]
+naque-core    = { path = "../naque-core" }
+naque-sql     = { path = "../naque-sql" }
+naque-db      = { path = "../naque-db" }
+naque-schema  = { path = "../naque-schema" }
+naque-llm     = { path = "../naque-llm" }
+naque-tui     = { path = "../naque-tui" }
+naque-profile = { path = "../naque-profile" }
+async-trait   = "0.1"
+thiserror     = "1"
+tokio         = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+clap          = { version = "4", features = ["derive"] }
+ratatui       = "0.29"
+anyhow        = "1"
+
+[dev-dependencies]
+tempfile    = "3"
+serde_json  = "1"
