@@ -23,11 +23,11 @@ pub struct Args {
     #[arg(long = "no-color")]
     pub no_color: bool,
 
-    /// AI provider override (e.g. "hf", "openai", "claude").
+    /// AI provider override (claude | openai | gemini | hf | ollama).
     #[arg(long)]
     pub provider: Option<String>,
 
-    /// Model name override (e.g. "zai-org/GLM-5.2:together").
+    /// Model name override (e.g. "claude-opus-4-8", "zai-org/GLM-5.2").
     #[arg(long)]
     pub model: Option<String>,
 }

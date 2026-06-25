@@ -27,6 +27,6 @@ pub use discovery::find_naque_toml;
 pub use error::ConfigError;
 pub use file::NaqueFile;
 pub use profile::{ConnectionSpec, ProfileBody, ProfileEngine};
-pub use resolve::{resolve, Overrides, Resolved};
+pub use resolve::{detect_provider, resolve, Overrides, Resolved};
 pub use secrets::{Secrets, SystemSecrets};
 pub use store::Store;

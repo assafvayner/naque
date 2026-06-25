@@ -109,14 +109,6 @@ pub fn resolve(
     };
 
     // -------------------------------------------------------------------------
-    // Config precedence: default → central → local → overrides
-    // -------------------------------------------------------------------------
-    let config = NaqueConfig::default()
-        .merge(central.config.clone().unwrap_or_default())
-        .merge(local.config.clone().unwrap_or_default())
-        .merge(overrides.config.clone());
-
-    // -------------------------------------------------------------------------
     // Profile union: central first, then local (local wins on collision)
     // -------------------------------------------------------------------------
     let mut profiles: BTreeMap<String, ProfileBody> = central.profiles.clone().unwrap_or_default();
@@ -139,6 +131,32 @@ pub fn resolve(
         .clone()
         .or_else(|| local.project.clone())
         .or_else(|| central.default_profile.clone());
+
+    // -------------------------------------------------------------------------
+    // Config precedence: default → central → local → active profile → overrides
+    //
+    // The active profile's inline `[config]` keys (e.g. `model`, `provider`)
+    // win over the global/local `[config]` but lose to CLI overrides. When no
+    // profile is active, or it has no inline config, this layer is a no-op.
+    // -------------------------------------------------------------------------
+    let profile_config = active_profile
+        .as_ref()
+        .and_then(|name| profiles.get(name))
+        .map(|body| body.config.clone())
+        .unwrap_or_default();
+
+    let mut config = NaqueConfig::default()
+        .merge(central.config.clone().unwrap_or_default())
+        .merge(local.config.clone().unwrap_or_default())
+        .merge(profile_config)
+        .merge(overrides.config.clone());
+
+    // If no provider was set anywhere, detect one from the environment by
+    // common API-key variables. This only fills an absent provider — an
+    // explicit config/profile/CLI provider always wins.
+    if config.provider.is_none() {
+        config.provider = detect_provider(secrets);
+    }
 
     // -------------------------------------------------------------------------
     // Connection URL precedence
@@ -274,6 +292,25 @@ impl ConnectionSpec {
         // sqlx expects sqlite://<path>; for absolute paths this produces
         // sqlite:///absolute/path (three slashes total).
         Ok(format!("sqlite://{}", path))
+    }
+}
+
+/// Detect which AI provider to use from common API-key environment variables.
+///
+/// Priority (first present wins): Anthropic → OpenAI → Gemini → Hugging Face
+/// Inference Providers. Returns the provider identifier string used by the
+/// `naque` binary's provider switch, or `None` if no known key is set.
+pub fn detect_provider(secrets: &dyn Secrets) -> Option<String> {
+    if secrets.env("ANTHROPIC_API_KEY").is_some() {
+        Some("claude".to_string())
+    } else if secrets.env("OPENAI_API_KEY").is_some() {
+        Some("openai".to_string())
+    } else if secrets.env("GEMINI_API_KEY").is_some() || secrets.env("GOOGLE_API_KEY").is_some() {
+        Some("gemini".to_string())
+    } else if secrets.env("HF_TOKEN").is_some() {
+        Some("hf".to_string())
+    } else {
+        None
     }
 }
 
@@ -805,6 +842,144 @@ path = "{}"
     // =========================================================================
     // Test 14: resolve_url postgres with password_keyring (fake keyring)
     // =========================================================================
+    // =========================================================================
+    // Test 15: active profile's inline config wins over central/local config
+    // but loses to CLI overrides
+    // =========================================================================
+    #[test]
+    fn profile_config_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(
+            &tmp,
+            Some(
+                r#"
+default_profile = "prod"
+
+[config]
+model = "central-model"
+mode = "default"
+row_cap = 1000
+"#,
+            ),
+            Some(
+                r#"
+[profiles.prod]
+engine = "postgres"
+host = "h"
+user = "u"
+dbname = "d"
+model = "profile-model"
+mode = "readonly"
+"#,
+            ),
+        );
+        let local_dir = tmp.path().join("proj");
+        fs::create_dir_all(&local_dir).unwrap();
+
+        // Case 1: profile config overrides central config (no CLI override).
+        {
+            let overrides = Overrides::default();
+            let secrets = FakeSecrets::new();
+            let resolved = resolve(&store, &local_dir, &overrides, &secrets).unwrap();
+            assert_eq!(resolved.config.model.as_deref(), Some("profile-model"));
+            assert_eq!(resolved.config.mode.as_deref(), Some("readonly"));
+            // central-only key still flows through
+            assert_eq!(resolved.config.row_cap, Some(1000));
+        }
+
+        // Case 2: CLI override beats the profile config.
+        {
+            let overrides = Overrides {
+                config: NaqueConfig {
+                    model: Some("cli-model".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let secrets = FakeSecrets::new();
+            let resolved = resolve(&store, &local_dir, &overrides, &secrets).unwrap();
+            assert_eq!(resolved.config.model.as_deref(), Some("cli-model"));
+            // mode still comes from the profile (no CLI override for it)
+            assert_eq!(resolved.config.mode.as_deref(), Some("readonly"));
+        }
+    }
+
+    // =========================================================================
+    // Test 16: provider auto-detection from env keys + priority order
+    // =========================================================================
+    #[test]
+    fn detect_provider_priority() {
+        // Anthropic wins over everything else.
+        let s = FakeSecrets::new()
+            .with_env("ANTHROPIC_API_KEY", "a")
+            .with_env("OPENAI_API_KEY", "o")
+            .with_env("GEMINI_API_KEY", "g")
+            .with_env("HF_TOKEN", "h");
+        assert_eq!(detect_provider(&s).as_deref(), Some("claude"));
+
+        // OpenAI next.
+        let s = FakeSecrets::new()
+            .with_env("OPENAI_API_KEY", "o")
+            .with_env("GEMINI_API_KEY", "g")
+            .with_env("HF_TOKEN", "h");
+        assert_eq!(detect_provider(&s).as_deref(), Some("openai"));
+
+        // Gemini via GEMINI_API_KEY, then GOOGLE_API_KEY.
+        let s = FakeSecrets::new()
+            .with_env("GEMINI_API_KEY", "g")
+            .with_env("HF_TOKEN", "h");
+        assert_eq!(detect_provider(&s).as_deref(), Some("gemini"));
+        let s = FakeSecrets::new()
+            .with_env("GOOGLE_API_KEY", "g")
+            .with_env("HF_TOKEN", "h");
+        assert_eq!(detect_provider(&s).as_deref(), Some("gemini"));
+
+        // HF_TOKEN last.
+        let s = FakeSecrets::new().with_env("HF_TOKEN", "h");
+        assert_eq!(detect_provider(&s).as_deref(), Some("hf"));
+
+        // Nothing set → None.
+        let s = FakeSecrets::new();
+        assert_eq!(detect_provider(&s), None);
+    }
+
+    // =========================================================================
+    // Test 17: detection only fills an absent provider; explicit config wins
+    // =========================================================================
+    #[test]
+    fn resolve_provider_detection_only_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local_dir = tmp.path().join("proj");
+        fs::create_dir_all(&local_dir).unwrap();
+
+        // No provider configured anywhere → detection fills it from env.
+        {
+            let store = make_store(&tmp, None, None);
+            let overrides = Overrides::default();
+            let secrets = FakeSecrets::new().with_env("HF_TOKEN", "x");
+            let resolved = resolve(&store, &local_dir, &overrides, &secrets).unwrap();
+            assert_eq!(resolved.config.provider.as_deref(), Some("hf"));
+        }
+
+        // Explicit central provider wins over a detectable env key.
+        {
+            let store = make_store(
+                &tmp,
+                Some(
+                    r#"
+[config]
+provider = "openai"
+"#,
+                ),
+                None,
+            );
+            let overrides = Overrides::default();
+            let secrets = FakeSecrets::new().with_env("ANTHROPIC_API_KEY", "x");
+            let resolved = resolve(&store, &local_dir, &overrides, &secrets).unwrap();
+            assert_eq!(resolved.config.provider.as_deref(), Some("openai"));
+        }
+    }
+
     #[test]
     fn resolve_url_postgres_with_password_keyring() {
         let spec = ConnectionSpec {

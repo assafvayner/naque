@@ -3,7 +3,9 @@
 use anyhow::{anyhow, Context};
 use naque_core::PermissionMode;
 use naque_db::Database;
-use naque_llm::{Agent, AgentConfig, ClaudeProvider, HfProvider, OllamaProvider, OpenAIProvider};
+use naque_llm::{
+    Agent, AgentConfig, ClaudeProvider, GeminiProvider, HfProvider, OllamaProvider, OpenAIProvider,
+};
 use naque_profile::{NaqueConfig, Overrides, Store, SystemSecrets};
 use naque_tui::Theme;
 
@@ -70,7 +72,9 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let catastrophic_guard = !args.no_guard;
     let row_cap = resolved.config.row_cap.unwrap_or(1000) as usize;
 
-    // 7. Build provider.
+    // 7. Build provider. `config.provider` is filled by resolution either from
+    //    config/profile/CLI or by env-key auto-detection; `None` here means no
+    //    provider was configured and no known API key was found.
     let provider: Box<dyn naque_llm::LlmProvider> = match resolved.config.provider.as_deref() {
         Some("openai") => {
             let p =
@@ -82,11 +86,27 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
             let p = HfProvider::from_env().map_err(|e| anyhow!("HF provider error: {e}"))?;
             Box::new(p)
         }
-        // "claude" / "anthropic" / None → Claude
-        _ => {
+        Some("gemini") | Some("google") => {
+            let p =
+                GeminiProvider::from_env().map_err(|e| anyhow!("Gemini provider error: {e}"))?;
+            Box::new(p)
+        }
+        Some("claude") | Some("anthropic") => {
             let p =
                 ClaudeProvider::from_env().map_err(|e| anyhow!("Claude provider error: {e}"))?;
             Box::new(p)
+        }
+        Some(other) => {
+            return Err(anyhow!(
+                "unknown provider {other:?}; expected one of: claude, openai, gemini, hf, ollama"
+            ))
+        }
+        None => {
+            return Err(anyhow!(
+                "no AI provider configured and no known API key found — set one of \
+                 ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or HF_TOKEN, \
+                 or set `provider` in your config/profile or pass --provider"
+            ))
         }
     };
 
@@ -132,8 +152,36 @@ fn default_model_for_provider(provider: Option<&str>) -> String {
     match provider {
         Some("openai") => "gpt-4o".to_string(),
         Some("ollama") => "llama3".to_string(),
-        Some("hf") | Some("huggingface") => "zai-org/GLM-5.2:together".to_string(),
+        // No `:provider` suffix — let HF Inference Providers pick the backend.
+        Some("hf") | Some("huggingface") => "zai-org/GLM-5.2".to_string(),
+        Some("gemini") | Some("google") => "gemini-2.5-flash".to_string(),
         // claude / anthropic / None
         _ => "claude-opus-4-8".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_models_per_provider() {
+        assert_eq!(
+            default_model_for_provider(Some("claude")),
+            "claude-opus-4-8"
+        );
+        assert_eq!(default_model_for_provider(None), "claude-opus-4-8");
+        assert_eq!(default_model_for_provider(Some("openai")), "gpt-4o");
+        assert_eq!(
+            default_model_for_provider(Some("gemini")),
+            "gemini-2.5-flash"
+        );
+        // HF default carries no `:provider` pin (auto backend selection).
+        let hf = default_model_for_provider(Some("hf"));
+        assert_eq!(hf, "zai-org/GLM-5.2");
+        assert!(
+            !hf.contains(':'),
+            "HF default must not pin a provider: {hf}"
+        );
     }
 }

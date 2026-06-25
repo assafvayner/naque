@@ -13,6 +13,6 @@ pub use agent::{Agent, AgentConfig, TurnResult};
 pub use error::LlmError;
 pub use mock::{MockExecutor, MockProvider};
 pub use provider::{LlmProvider, ToolExecutor};
-pub use providers::{ClaudeProvider, HfProvider, OllamaProvider, OpenAIProvider};
+pub use providers::{ClaudeProvider, GeminiProvider, HfProvider, OllamaProvider, OpenAIProvider};
 pub use tools::standard_tools;
 pub use types::{LlmRequest, LlmResponse, Message, ToolCall, ToolDef, Usage};

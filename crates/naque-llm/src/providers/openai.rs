@@ -140,6 +140,45 @@ pub(crate) fn openai_parse_response(json: &Value) -> Result<LlmResponse, LlmErro
     })
 }
 
+/// Perform an OpenAI-compatible chat-completions POST and parse the response.
+///
+/// Shared by every provider that speaks the OpenAI chat-completions dialect
+/// (`OpenAIProvider`, `HfProvider`, `GeminiProvider`). The caller supplies the
+/// fully-formed endpoint `url` and a bearer `api_key`.
+pub(crate) async fn openai_chat_completion(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    req: &LlmRequest,
+) -> Result<LlmResponse, LlmError> {
+    let body = openai_build_body(req);
+
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LlmError::Provider(e.to_string()))?;
+
+    let status = resp.status();
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| LlmError::Provider(e.to_string()))?;
+
+    if !status.is_success() {
+        let msg = json
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(LlmError::Provider(format!("HTTP {status}: {msg}")));
+    }
+
+    openai_parse_response(&json)
+}
+
 pub(crate) fn map_message(msg: &Message) -> Value {
     match msg {
         Message::User(s) => json!({ "role": "user", "content": s }),
@@ -190,32 +229,6 @@ impl crate::LlmProvider for OpenAIProvider {
 
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let body = self.build_body(req);
-
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Provider(e.to_string()))?;
-
-        let status = resp.status();
-        let json: Value = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::Provider(e.to_string()))?;
-
-        if !status.is_success() {
-            let msg = json
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            return Err(LlmError::Provider(format!("HTTP {status}: {msg}")));
-        }
-
-        Self::parse_response(&json)
+        openai_chat_completion(&self.client, &url, &self.api_key, req).await
     }
 }

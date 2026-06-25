@@ -19,7 +19,7 @@ use naque_core::PermissionMode;
 use naque_db::Database;
 use naque_llm::{Agent, AgentConfig, HfProvider};
 
-const DEFAULT_MODEL: &str = "zai-org/GLM-5.2:together";
+const DEFAULT_MODEL: &str = "zai-org/GLM-5.2";
 
 const SYSTEM_PREAMBLE: &str = "\
 You are a careful SQL assistant connected to a relational database. \

@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::NaqueConfig;
+
 /// Which database engine a profile targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,6 +60,14 @@ pub struct ProfileBody {
     #[serde(flatten)]
     pub connection: ConnectionSpec,
 
+    /// Per-profile settings overriding the global/local `[config]`. Flattened
+    /// so keys like `model` and `provider` sit at the profile's top level
+    /// (e.g. `model = "claude-opus-4-8"` directly under `[profiles.prod]`).
+    /// During resolution these win over central and local config but lose to
+    /// CLI overrides.
+    #[serde(flatten)]
+    pub config: NaqueConfig,
+
     /// Optional inline documentation / notes for this profile.
     pub docs: Option<Vec<String>>,
 }
@@ -90,5 +100,33 @@ mod tests {
         let serialized = toml::to_string(&spec).unwrap();
         let back: ConnectionSpec = toml::from_str(&serialized).unwrap();
         assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn profile_body_parses_connection_and_inline_config() {
+        // Connection fields and per-profile config keys coexist at the top
+        // level of the profile body (both flattened).
+        let toml_str = r#"
+engine = "postgres"
+host = "db.example.com"
+port = 6543
+user = "analyst"
+provider = "claude"
+model = "claude-opus-4-8"
+mode = "readonly"
+docs = ["prod read replica"]
+"#;
+        let body: ProfileBody = toml::from_str(toml_str).unwrap();
+        assert_eq!(body.connection.engine, Some(ProfileEngine::Postgres));
+        assert_eq!(body.connection.host.as_deref(), Some("db.example.com"));
+        assert_eq!(body.connection.port, Some(6543));
+        assert_eq!(body.connection.user.as_deref(), Some("analyst"));
+        assert_eq!(body.config.provider.as_deref(), Some("claude"));
+        assert_eq!(body.config.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(body.config.mode.as_deref(), Some("readonly"));
+        assert_eq!(
+            body.docs.as_deref(),
+            Some(&["prod read replica".to_string()][..])
+        );
     }
 }

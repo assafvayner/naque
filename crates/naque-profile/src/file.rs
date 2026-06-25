@@ -141,7 +141,7 @@ password_keyring = "naque-local"
                             host: Some("db.prod".into()),
                             ..Default::default()
                         },
-                        docs: None,
+                        ..Default::default()
                     },
                 );
                 m

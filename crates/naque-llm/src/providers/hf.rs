@@ -1,8 +1,6 @@
-use serde_json::Value;
-
 use crate::{LlmError, LlmRequest, LlmResponse};
 
-use super::openai::{openai_build_body, openai_parse_response};
+use super::openai::openai_chat_completion;
 
 pub struct HfProvider {
     api_key: String,
@@ -37,32 +35,6 @@ impl crate::LlmProvider for HfProvider {
 
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let body = openai_build_body(req);
-
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Provider(e.to_string()))?;
-
-        let status = resp.status();
-        let json: Value = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::Provider(e.to_string()))?;
-
-        if !status.is_success() {
-            let msg = json
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            return Err(LlmError::Provider(format!("HTTP {status}: {msg}")));
-        }
-
-        openai_parse_response(&json)
+        openai_chat_completion(&self.client, &url, &self.api_key, req).await
     }
 }

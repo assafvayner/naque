@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use crate::{
-    ClaudeProvider, HfProvider, LlmProvider, LlmRequest, Message, OllamaProvider, OpenAIProvider,
-    ToolCall, ToolDef,
+    ClaudeProvider, GeminiProvider, HfProvider, LlmProvider, LlmRequest, Message, OllamaProvider,
+    OpenAIProvider, ToolCall, ToolDef,
 };
 
 use super::openai::{openai_build_body, openai_parse_response};
@@ -375,6 +375,16 @@ fn openai_parse_response_empty_content_with_tool_calls() {
     assert_eq!(resp.stop_reason, "tool_calls");
     assert_eq!(resp.usage.input_tokens, 42);
     assert_eq!(resp.usage.output_tokens, 12);
+}
+
+// ---------------------------------------------------------------------------
+// GeminiProvider tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gemini_name() {
+    let provider = GeminiProvider::new("k".to_string(), None);
+    assert_eq!(provider.name(), "gemini");
 }
 
 // ---------------------------------------------------------------------------
