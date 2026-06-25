@@ -61,6 +61,19 @@ impl Theme {
         }
     }
 
+    /// Map a classification *label* (as stored on a transcript entry or
+    /// approval prompt, e.g. `"read-only"`, `"WRITE: UPDATE"`, `"DDL: DROP"`)
+    /// to the matching [`StatementKind`] and catastrophic flag, then return the
+    /// corresponding [`classification_style`](Self::classification_style).
+    ///
+    /// This keeps SQL badge coloring consistent between the transcript view and
+    /// the approval prompt, and degrades correctly under NO_COLOR (kind colors
+    /// drop out, catastrophic stays BOLD | REVERSED).
+    pub fn label_style(&self, label: &str) -> Style {
+        let (kind, catastrophic) = classify_label(label);
+        self.classification_style(kind, catastrophic)
+    }
+
     /// Style for the permission-mode segment in the status bar.
     ///
     /// Color mapping (color-on):
@@ -99,9 +112,102 @@ impl Theme {
     }
 }
 
+/// Infer a [`StatementKind`] and catastrophic flag from a classification label.
+///
+/// Labels are produced by `naque-sql` (e.g. `"read-only"`, `"WRITE: UPDATE"`,
+/// `"DDL: DROP"`, `"DDL: TRUNCATE"`). The mapping is a best-effort textual
+/// match used purely for badge coloring; the authoritative gate signal lives in
+/// `naque-core`. A label that mentions DROP/TRUNCATE or "catastrophic" is
+/// treated as catastrophic so it renders with the danger style.
+fn classify_label(label: &str) -> (StatementKind, bool) {
+    let lower = label.to_ascii_lowercase();
+
+    let catastrophic =
+        lower.contains("catastrophic") || lower.contains("drop") || lower.contains("truncate");
+
+    let kind = if lower.starts_with("read-only") || lower.starts_with("read only") {
+        StatementKind::Read
+    } else if lower.starts_with("write") {
+        StatementKind::Write
+    } else if lower.starts_with("ddl") {
+        StatementKind::Ddl
+    } else if lower.starts_with("transaction") {
+        StatementKind::Transaction
+    } else if lower.starts_with("set") {
+        StatementKind::Set
+    } else {
+        StatementKind::Unknown
+    };
+
+    (kind, catastrophic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- classify_label / label_style ---
+
+    #[test]
+    fn classify_label_read_only() {
+        assert_eq!(classify_label("read-only"), (StatementKind::Read, false));
+    }
+
+    #[test]
+    fn classify_label_write() {
+        assert_eq!(
+            classify_label("WRITE: UPDATE"),
+            (StatementKind::Write, false)
+        );
+    }
+
+    #[test]
+    fn classify_label_ddl_drop_is_catastrophic() {
+        assert_eq!(classify_label("DDL: DROP"), (StatementKind::Ddl, true));
+    }
+
+    #[test]
+    fn classify_label_ddl_truncate_is_catastrophic() {
+        assert_eq!(classify_label("DDL: TRUNCATE"), (StatementKind::Ddl, true));
+    }
+
+    #[test]
+    fn classify_label_plain_ddl_not_catastrophic() {
+        assert_eq!(classify_label("DDL: CREATE"), (StatementKind::Ddl, false));
+    }
+
+    #[test]
+    fn classify_label_unknown_default() {
+        assert_eq!(classify_label("SQL"), (StatementKind::Unknown, false));
+    }
+
+    #[test]
+    fn label_style_write_has_yellow_fg_with_color() {
+        let style = Theme::new(true).label_style("WRITE: UPDATE");
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn label_style_read_has_green_fg_with_color() {
+        let style = Theme::new(true).label_style("read-only");
+        assert_eq!(style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn label_style_catastrophic_drop_is_red_bold_reversed() {
+        let style = Theme::new(true).label_style("DDL: DROP");
+        assert_eq!(style.fg, Some(Color::Red));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn label_style_no_color_drops_fg_keeps_catastrophic_modifiers() {
+        let style = Theme::new(false).label_style("DDL: DROP");
+        assert!(style.fg.is_none());
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::REVERSED));
+    }
 
     // --- classification_style ---
 

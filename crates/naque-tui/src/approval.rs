@@ -77,6 +77,43 @@ impl ApprovalPrompt {
         }
     }
 
+    /// Whether this prompt represents a catastrophic action (shows the red
+    /// warning line). Used by callers to size a containing modal.
+    pub fn is_catastrophic(&self) -> bool {
+        self.catastrophic.is_some()
+    }
+
+    /// Number of physical lines in the SQL text (at least 1). Used by callers
+    /// to size a containing modal so the SQL is never clipped.
+    pub fn sql_line_count(&self) -> usize {
+        self.sql.lines().count().max(1)
+    }
+
+    /// Widest content line (header, warning, or any SQL line), in characters.
+    /// Used by callers to size a containing modal wide enough for the content.
+    pub fn content_width(&self) -> usize {
+        let header = format!("Run this query?  classified: {}", self.label)
+            .chars()
+            .count();
+        let warning = self
+            .catastrophic
+            .map(|r| {
+                format!("⚠  CATASTROPHIC: {} — review carefully!", r.human())
+                    .chars()
+                    .count()
+            })
+            .unwrap_or(0);
+        let sql = self
+            .sql
+            .lines()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        // The picker options are short ("❯ (e) Edit before run"); the header
+        // and SQL dominate, so consider those.
+        header.max(warning).max(sql)
+    }
+
     /// Forward a key event to the picker and map the outcome.
     ///
     /// - `Selected(0)` → `Accept`
@@ -96,8 +133,14 @@ impl ApprovalPrompt {
     pub fn render(&self, theme: &Theme, area: Rect, buf: &mut Buffer) {
         let mut y = area.y;
 
-        let header = format!("Run this query?  classified: {}", self.label);
-        let header_line = Line::from(Span::raw(&header));
+        // "classified: <label>" — the label is styled by classification so the
+        // badge color matches the transcript view (write=yellow, ddl=magenta,
+        // read=green). For a catastrophic label `label_style` returns the
+        // danger style, which is consistent with the red warning line below.
+        let header_line = Line::from(vec![
+            Span::raw("Run this query?  classified: "),
+            Span::styled(self.label.clone(), theme.label_style(&self.label)),
+        ]);
         if y < area.y + area.height {
             header_line.render(
                 Rect {

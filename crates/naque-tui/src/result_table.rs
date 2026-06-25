@@ -14,6 +14,36 @@ use ratatui::{
 
 use crate::Theme;
 
+/// Column separator rendered between adjacent columns.
+const SEP: &str = " | ";
+/// Text used to display a SQL `NULL` cell.
+const NULL_TEXT: &str = "NULL";
+/// Maximum rendered width of any one column, in display characters.
+const MAX_COL_WIDTH: usize = 40;
+
+/// Display width (in `char`s) of a string. Used for column-width math; this is
+/// a grapheme-naive count, which is adequate for the ASCII-dominant tabular
+/// data the result table renders.
+fn display_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// Left-align `s` to exactly `width` display characters: pad with trailing
+/// spaces when shorter, or truncate when longer.
+fn pad_or_truncate(s: &str, width: usize) -> String {
+    let len = display_len(s);
+    if len == width {
+        s.to_string()
+    } else if len < width {
+        let mut out = String::with_capacity(width);
+        out.push_str(s);
+        out.extend(std::iter::repeat_n(' ', width - len));
+        out
+    } else {
+        s.chars().take(width).collect()
+    }
+}
+
 /// A scrollable table of query results.
 pub struct ResultTable {
     pub columns: Vec<String>,
@@ -47,7 +77,40 @@ impl ResultTable {
         self.offset = self.offset.saturating_sub(page);
     }
 
+    /// Compute each column's display width: `max(header_len, max visible cell
+    /// display len)`, capped at [`MAX_COL_WIDTH`]. `NULL` cells count as the
+    /// width of the literal `"NULL"`.
+    ///
+    /// Only the visible window (from `offset`) contributes, so columns stay
+    /// stable as the user scrolls within a page.
+    fn column_widths(&self) -> Vec<usize> {
+        let mut widths: Vec<usize> = self
+            .columns
+            .iter()
+            .map(|c| display_len(c).min(MAX_COL_WIDTH))
+            .collect();
+
+        for row in self.rows.iter().skip(self.offset) {
+            for (i, cell) in row.iter().enumerate() {
+                if i >= widths.len() {
+                    break;
+                }
+                let len = match cell {
+                    Some(v) => display_len(v),
+                    None => NULL_TEXT.len(),
+                };
+                widths[i] = widths[i].max(len.min(MAX_COL_WIDTH));
+            }
+        }
+
+        widths
+    }
+
     /// Render a header row followed by the visible window of data rows.
+    ///
+    /// Columns are aligned: each cell is left-padded (or truncated) to its
+    /// column width so values line up under their headers. The separator line
+    /// spans the actual total table width, not the full area width.
     ///
     /// `NULL` values are rendered as `"NULL"` with the DIM modifier.
     pub fn render(&self, theme: &Theme, area: Rect, buf: &mut Buffer) {
@@ -55,6 +118,12 @@ impl ResultTable {
             return;
         }
         let _ = theme; // theme reserved for future highlight support
+
+        let widths = self.column_widths();
+        // Total table width: sum of column widths plus " | " (3 chars) between
+        // each adjacent pair of columns.
+        let table_width: usize =
+            widths.iter().sum::<usize>() + SEP.len() * widths.len().saturating_sub(1);
 
         let mut y = area.y;
 
@@ -65,10 +134,14 @@ impl ResultTable {
                 .iter()
                 .enumerate()
                 .flat_map(|(i, col)| {
-                    let sep = if i == 0 { "" } else { " | " };
+                    let sep = if i == 0 { "" } else { SEP };
+                    let w = widths.get(i).copied().unwrap_or_else(|| display_len(col));
                     vec![
                         Span::raw(sep),
-                        Span::styled(col.as_str(), Style::default().add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            pad_or_truncate(col, w),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
                     ]
                 })
                 .collect();
@@ -87,9 +160,10 @@ impl ResultTable {
             }
         }
 
-        // Separator
+        // Separator — sized to the actual table width (clamped to the area).
         if y < area.y + area.height {
-            let sep = "-".repeat(area.width as usize);
+            let sep_width = table_width.min(area.width as usize);
+            let sep = "-".repeat(sep_width);
             Line::from(Span::raw(sep)).render(
                 Rect {
                     x: area.x,
@@ -112,10 +186,11 @@ impl ResultTable {
                 .iter()
                 .enumerate()
                 .flat_map(|(i, cell)| {
-                    let sep = if i == 0 { "" } else { " | " };
+                    let sep = if i == 0 { "" } else { SEP };
+                    let w = widths.get(i).copied().unwrap_or(0);
                     let cell_span = match cell {
-                        Some(v) => Span::raw(v.as_str()),
-                        None => Span::styled("NULL", dim_style),
+                        Some(v) => Span::raw(pad_or_truncate(v, w)),
+                        None => Span::styled(pad_or_truncate(NULL_TEXT, w), dim_style),
                     };
                     vec![Span::raw(sep), cell_span]
                 })
@@ -353,5 +428,118 @@ mod tests {
             content.contains('a'),
             "expected cell value 'a' in render: {content}"
         );
+    }
+
+    // --- column alignment ---
+
+    #[test]
+    fn column_widths_use_max_of_header_and_cells() {
+        // "customer" header (8) vs longest value "Carolyn" (7) → 8.
+        // "id" header (2) vs values "1"/"2" (1) → 2.
+        let t = ResultTable::new(
+            vec!["id".into(), "customer".into()],
+            vec![
+                vec![Some("1".into()), Some("Bob".into())],
+                vec![Some("2".into()), Some("Carolyn".into())],
+            ],
+        );
+        assert_eq!(t.column_widths(), vec![2, 8]);
+    }
+
+    #[test]
+    fn column_widths_cap_at_max() {
+        let long = "x".repeat(100);
+        let t = ResultTable::new(vec!["c".into()], vec![vec![Some(long)]]);
+        assert_eq!(t.column_widths(), vec![MAX_COL_WIDTH]);
+    }
+
+    #[test]
+    fn column_widths_count_null_as_four() {
+        // header "c" (1) vs NULL (4) → 4.
+        let t = ResultTable::new(vec!["c".into()], vec![vec![None]]);
+        assert_eq!(t.column_widths(), vec![4]);
+    }
+
+    #[test]
+    fn render_aligns_cells_under_headers() {
+        // Column widths: id=2, customer=8. Header row and each data row should
+        // start each column at the same x offset.
+        let t = ResultTable::new(
+            vec!["id".into(), "customer".into()],
+            vec![
+                vec![Some("1".into()), Some("Bob".into())],
+                vec![Some("2".into()), Some("Carolyn".into())],
+            ],
+        );
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        t.render(&Theme::new(false), area, &mut buf);
+
+        let row = |y: u16| -> String {
+            (0..40)
+                .map(|x| {
+                    buf.cell((x, y))
+                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                })
+                .collect()
+        };
+
+        // The second column starts after "id" (2) + " | " (3) = offset 5.
+        // Header: "id" then " | " then "customer".
+        let header = row(0);
+        assert_eq!(&header[0..2], "id");
+        assert_eq!(&header[2..5], " | ");
+        assert_eq!(&header[5..13], "customer");
+
+        // Data row 0: "1 " (padded to 2) then " | " then "Bob     " (padded 8).
+        let data0 = row(2);
+        assert_eq!(&data0[0..2], "1 ");
+        assert_eq!(&data0[2..5], " | ");
+        assert_eq!(&data0[5..13], "Bob     ");
+
+        // Data row 1: "2 " then " | " then "Carolyn ".
+        let data1 = row(3);
+        assert_eq!(&data1[0..2], "2 ");
+        assert_eq!(&data1[5..13], "Carolyn ");
+    }
+
+    #[test]
+    fn render_separator_matches_table_width_not_area() {
+        // id=2, name=4 ("NULL" widens it to 4). table width = 2 + 3 + 4 = 9.
+        let t = table();
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        t.render(&Theme::new(false), area, &mut buf);
+
+        let sep_row: String = (0..40)
+            .map(|x| {
+                buf.cell((x, 1))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+        let dashes = sep_row.chars().take_while(|&c| c == '-').count();
+        assert_eq!(dashes, 9, "separator should be table width 9, got {dashes}");
+        // Beyond the table width the separator row must be blank.
+        assert!(
+            sep_row[9..].chars().all(|c| c == ' '),
+            "separator must not span full area width: {sep_row:?}"
+        );
+    }
+
+    // --- pad_or_truncate ---
+
+    #[test]
+    fn pad_or_truncate_pads_short() {
+        assert_eq!(pad_or_truncate("ab", 5), "ab   ");
+    }
+
+    #[test]
+    fn pad_or_truncate_truncates_long() {
+        assert_eq!(pad_or_truncate("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn pad_or_truncate_exact() {
+        assert_eq!(pad_or_truncate("abc", 3), "abc");
     }
 }

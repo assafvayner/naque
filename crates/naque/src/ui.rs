@@ -8,9 +8,9 @@ use ratatui::{
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
         ExecutableCommand,
     },
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::io;
@@ -49,24 +49,20 @@ pub fn render(
 ) {
     let size = frame.area();
 
-    // Determine heights: input = 1, status = 1, result = up to 10 if present,
-    // approval prompt = up to 10 if present, transcript = remainder.
+    // Determine heights: input = 1, status = 1, result = up to 8 if present,
+    // transcript = remainder. The approval prompt is no longer a layout band —
+    // it is drawn as a centered modal popup over the whole screen (below).
     let has_result = app.last_result().is_some();
-    let has_pending = pending.is_some();
 
     let result_height: u16 = if has_result { 8 } else { 0 };
-    let approval_height: u16 = if has_pending { 8 } else { 0 };
     let fixed_bottom: u16 = 1 + 1; // status + input
-    let transcript_height = size
-        .height
-        .saturating_sub(fixed_bottom + result_height + approval_height);
+    let transcript_height = size.height.saturating_sub(fixed_bottom + result_height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(transcript_height),
             Constraint::Length(result_height),
-            Constraint::Length(approval_height),
             Constraint::Length(1), // status bar
             Constraint::Length(1), // input line
         ])
@@ -77,32 +73,30 @@ pub fn render(
         let lines: Vec<Line> = app
             .transcript()
             .iter()
-            .flat_map(|entry| match entry {
-                TranscriptEntry::User(text) => {
-                    vec![Line::from(Span::raw(format!("you: {text}")))]
-                }
-                TranscriptEntry::Agent(text) => {
-                    vec![Line::from(Span::raw(format!(" ai: {text}")))]
-                }
-                TranscriptEntry::Sql { sql, label } => {
-                    vec![Line::from(Span::raw(format!("sql[{label}]: {sql}")))]
-                }
-                TranscriptEntry::Info(text) => {
-                    vec![Line::from(Span::raw(format!("inf: {text}")))]
-                }
-                TranscriptEntry::Error(text) => {
-                    vec![Line::from(Span::raw(format!("err: {text}")))]
-                }
-                TranscriptEntry::Rejected(sql) => {
-                    vec![Line::from(Span::raw(format!("rej: {sql}")))]
-                }
-            })
+            .flat_map(|entry| transcript_lines(entry, theme))
             .collect();
 
-        let para = Paragraph::new(lines)
+        // Bottom-align: show the most recent entries adjacent to the result /
+        // input area. Render only the last N lines that fit, and anchor them to
+        // the bottom of the transcript chunk so there is no large empty gap at
+        // the top when the history is short.
+        let chunk = chunks[0];
+        let visible = chunk.height as usize;
+        let start = lines.len().saturating_sub(visible);
+        let tail: Vec<Line> = lines[start..].to_vec();
+        let used = tail.len() as u16;
+        let pad = chunk.height.saturating_sub(used);
+        let anchored = Rect {
+            x: chunk.x,
+            y: chunk.y + pad,
+            width: chunk.width,
+            height: used,
+        };
+
+        let para = Paragraph::new(tail)
             .block(Block::default())
             .wrap(Wrap { trim: false });
-        frame.render_widget(para, chunks[0]);
+        frame.render_widget(para, anchored);
     }
 
     // ---- Result table -------------------------------------------------------
@@ -113,12 +107,6 @@ pub fn render(
         );
         let buf = frame.buffer_mut();
         table.render(theme, chunks[1], buf);
-    }
-
-    // ---- Approval prompt ---------------------------------------------------
-    if let Some(prompt) = pending {
-        let buf = frame.buffer_mut();
-        prompt.render(theme, chunks[2], buf);
     }
 
     // ---- Status bar --------------------------------------------------------
@@ -135,13 +123,96 @@ pub fn render(
             cost_usd,
         };
         let buf = frame.buffer_mut();
-        bar.render(theme, chunks[3], buf);
+        bar.render(theme, chunks[2], buf);
     }
 
     // ---- Input line --------------------------------------------------------
     {
         let line = Line::from(Span::raw(format!("> {input}")));
-        frame.render_widget(Paragraph::new(line), chunks[4]);
+        frame.render_widget(Paragraph::new(line), chunks[3]);
+    }
+
+    // ---- Approval prompt (centered modal popup) ----------------------------
+    // Drawn last so it sits on top of the transcript/result. `Clear` wipes the
+    // cells behind the modal so nothing bleeds through, then a bordered block
+    // frames the prompt. The modal is sized tall enough to always show the
+    // header, optional catastrophic warning, the SQL, and ALL THREE picker
+    // options with the ❯ selection marker.
+    if let Some(prompt) = pending {
+        let modal = centered_modal_rect(size, prompt);
+        frame.render_widget(Clear, modal);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Approval required ");
+        let inner = block.inner(modal);
+        frame.render_widget(block, modal);
+
+        let buf = frame.buffer_mut();
+        prompt.render(theme, inner, buf);
+    }
+}
+
+/// Compute a centered [`Rect`] for the approval modal, sized to fit the prompt
+/// content (header + optional warning + blank + SQL lines + blank + 3 options)
+/// plus the surrounding border.
+fn centered_modal_rect(area: Rect, prompt: &ApprovalPrompt) -> Rect {
+    // Content lines (matching ApprovalPrompt::render layout):
+    //   header(1) + warning(0|1) + blank(1) + sql_lines(N) + blank(1) + options(3)
+    let warning = if prompt.is_catastrophic() { 1 } else { 0 };
+    let sql_lines = prompt.sql_line_count().max(1) as u16;
+    let content_height = 1 + warning + 1 + sql_lines + 1 + 3;
+
+    // +2 for top/bottom border.
+    let desired_h = content_height + 2;
+    let height = desired_h.min(area.height.max(1));
+
+    // Width: at most ~80, at least enough for the longest content line, bounded
+    // by the available area minus a small margin.
+    let widest = prompt.content_width() as u16 + 4; // padding + borders
+    let max_w = area.width.saturating_sub(4).max(1);
+    let width = widest.clamp(20.min(max_w), 80.min(max_w)).min(max_w);
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Build the styled transcript line(s) for one [`TranscriptEntry`].
+///
+/// `Sql` entries get their `[label]` badge colored by classification via
+/// [`Theme::label_style`], so read/write/DDL/catastrophic statements are
+/// visually distinguishable (and degrade correctly under NO_COLOR).
+fn transcript_lines<'a>(entry: &'a TranscriptEntry, theme: &Theme) -> Vec<Line<'a>> {
+    match entry {
+        TranscriptEntry::User(text) => {
+            vec![Line::from(Span::raw(format!("you: {text}")))]
+        }
+        TranscriptEntry::Agent(text) => {
+            vec![Line::from(Span::raw(format!(" ai: {text}")))]
+        }
+        TranscriptEntry::Sql { sql, label } => {
+            vec![Line::from(vec![
+                Span::raw("sql["),
+                Span::styled(label.clone(), theme.label_style(label)),
+                Span::raw(format!("]: {sql}")),
+            ])]
+        }
+        TranscriptEntry::Info(text) => {
+            vec![Line::from(Span::raw(format!("inf: {text}")))]
+        }
+        TranscriptEntry::Error(text) => {
+            vec![Line::from(Span::raw(format!("err: {text}")))]
+        }
+        TranscriptEntry::Rejected(sql) => {
+            vec![Line::from(Span::raw(format!("rej: {sql}")))]
+        }
     }
 }
 
@@ -420,14 +491,12 @@ fn render_snapshot(
     pending: Option<&ApprovalPrompt>,
 ) {
     let size = frame.area();
-    let approval_height: u16 = if pending.is_some() { 10 } else { 0 };
-    let transcript_height = size.height.saturating_sub(2 + approval_height);
+    let transcript_height = size.height.saturating_sub(2);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(transcript_height),
-            Constraint::Length(approval_height),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
@@ -435,12 +504,6 @@ fn render_snapshot(
 
     // Blank transcript area.
     frame.render_widget(Paragraph::new(""), chunks[0]);
-
-    // Approval prompt.
-    if let Some(prompt) = pending {
-        let buf = frame.buffer_mut();
-        prompt.render(theme, chunks[1], buf);
-    }
 
     // Status bar.
     {
@@ -454,14 +517,29 @@ fn render_snapshot(
             cost_usd,
         };
         let buf = frame.buffer_mut();
-        bar.render(theme, chunks[2], buf);
+        bar.render(theme, chunks[1], buf);
     }
 
     // Input line.
     frame.render_widget(
         Paragraph::new(Line::from(Span::raw(format!("> {input}")))),
-        chunks[3],
+        chunks[2],
     );
+
+    // Approval prompt — centered modal popup (drawn last, on top).
+    if let Some(prompt) = pending {
+        let modal = centered_modal_rect(size, prompt);
+        frame.render_widget(Clear, modal);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Approval required ");
+        let inner = block.inner(modal);
+        frame.render_widget(block, modal);
+
+        let buf = frame.buffer_mut();
+        prompt.render(theme, inner, buf);
+    }
 }
 
 // ---------------------------------------------------------------------------
