@@ -1,5 +1,7 @@
 //! Headless engine — routes input, gates SQL, drives the LLM agent.
 
+use std::sync::Arc;
+
 use naque_core::PermissionMode;
 use naque_core::gate::QueryKind;
 use naque_db::{Database, Engine, QueryResult};
@@ -7,6 +9,7 @@ use naque_llm::{Agent, Usage};
 use naque_schema::SchemaModel;
 use naque_sql::{SqlDialect, classify};
 use naque_tui::{Input, route_input};
+use tokio::sync::Mutex;
 
 use crate::approval::Approver;
 use crate::executor::{QueryToolExecutor, format_result_text};
@@ -44,14 +47,212 @@ impl From<naque_schema::SchemaError> for AppError {
 // Transcript
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepStatus {
+    Running,
+    Ok,
+    Err,
+}
+
 #[derive(Debug, Clone)]
 pub enum TranscriptEntry {
     User(String),
     Agent(String),
-    Sql { sql: String, label: String },
+    Sql {
+        sql: String,
+        label: String,
+    },
     Info(String),
     Error(String),
     Rejected(String),
+    /// Streamed model narration that precedes/accompanies tool calls.
+    Reasoning(String),
+    /// A tool step; renders multi-line while `Running`, collapses when done.
+    ToolStep {
+        name: String,
+        sql: Option<String>,
+        status: StepStatus,
+        summary: Option<String>,
+    },
+}
+
+/// Fold one [`AgentEvent`] into the transcript. `cur` is the index of the
+/// currently-streaming `Reasoning` entry, if any.
+///
+/// Rules:
+/// - `TextDelta` appends to the current `Reasoning` entry (creating one if needed).
+/// - `ToolCallStarted` finalizes any streaming reasoning, then pushes a `Running` `ToolStep`.
+/// - `ToolCallFinished` collapses the matching trailing `ToolStep`.
+/// - `TurnFinished` relabels a trailing streaming `Reasoning` as the `Agent` answer (the final block of text is the
+///   answer, not narration).
+/// - `Cancelled` finalizes streaming reasoning and appends an `Info` note.
+pub fn apply_event_to_transcript(
+    transcript: &mut Vec<TranscriptEntry>,
+    cur: &mut Option<usize>,
+    event: &naque_llm::AgentEvent,
+) {
+    use naque_llm::AgentEvent as E;
+    match event {
+        E::TextDelta(chunk) => {
+            let idx = match *cur {
+                Some(i) => i,
+                None => {
+                    transcript.push(TranscriptEntry::Reasoning(String::new()));
+                    let i = transcript.len() - 1;
+                    *cur = Some(i);
+                    i
+                },
+            };
+            if let Some(TranscriptEntry::Reasoning(s)) = transcript.get_mut(idx) {
+                s.push_str(chunk);
+            }
+        },
+        E::ToolCallStarted { name, sql } => {
+            *cur = None;
+            transcript.push(TranscriptEntry::ToolStep {
+                name: name.clone(),
+                sql: sql.clone(),
+                status: StepStatus::Running,
+                summary: None,
+            });
+        },
+        E::ToolCallFinished { summary, is_error, .. } => {
+            if let Some(TranscriptEntry::ToolStep {
+                status, summary: slot, ..
+            }) = transcript.iter_mut().rev().find(|e| {
+                matches!(
+                    e,
+                    TranscriptEntry::ToolStep {
+                        status: StepStatus::Running,
+                        ..
+                    }
+                )
+            }) {
+                *status = if *is_error { StepStatus::Err } else { StepStatus::Ok };
+                *slot = Some(summary.clone());
+            }
+        },
+        E::TurnFinished { .. } => {
+            if let Some(i) = cur.take()
+                && let Some(TranscriptEntry::Reasoning(s)) = transcript.get(i)
+            {
+                let answer = s.clone();
+                transcript[i] = TranscriptEntry::Agent(answer);
+            }
+        },
+        E::Cancelled => {
+            *cur = None;
+            transcript.push(TranscriptEntry::Info("(cancelled)".into()));
+        },
+        E::TurnStarted | E::LlmCallStarted { .. } | E::UsageUpdated(_) => {},
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use naque_llm::AgentEvent;
+
+    use super::*;
+
+    fn names(t: &[TranscriptEntry]) -> Vec<&'static str> {
+        t.iter()
+            .map(|e| match e {
+                TranscriptEntry::Reasoning(_) => "reasoning",
+                TranscriptEntry::ToolStep { .. } => "step",
+                TranscriptEntry::Agent(_) => "agent",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn deltas_accumulate_into_one_reasoning_entry() {
+        let mut t: Vec<TranscriptEntry> = vec![];
+        let mut cur: Option<usize> = None;
+        apply_event_to_transcript(&mut t, &mut cur, &AgentEvent::TextDelta("Hel".into()));
+        apply_event_to_transcript(&mut t, &mut cur, &AgentEvent::TextDelta("lo".into()));
+        assert_eq!(t.len(), 1);
+        assert!(matches!(&t[0], TranscriptEntry::Reasoning(s) if s == "Hello"));
+    }
+
+    #[test]
+    fn tool_started_then_finished_collapses() {
+        let mut t: Vec<TranscriptEntry> = vec![];
+        let mut cur: Option<usize> = None;
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::ToolCallStarted {
+                name: "run_query".into(),
+                sql: Some("SELECT 1".into()),
+            },
+        );
+        assert!(matches!(
+            &t[0],
+            TranscriptEntry::ToolStep {
+                status: StepStatus::Running,
+                ..
+            }
+        ));
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::ToolCallFinished {
+                name: "run_query".into(),
+                summary: "1 rows".into(),
+                is_error: false,
+            },
+        );
+        match &t[0] {
+            TranscriptEntry::ToolStep { status, summary, .. } => {
+                assert_eq!(*status, StepStatus::Ok);
+                assert_eq!(summary.as_deref(), Some("1 rows"));
+            },
+            _ => panic!("expected ToolStep"),
+        }
+    }
+
+    #[test]
+    fn finish_relabels_trailing_reasoning_as_agent() {
+        let mut t: Vec<TranscriptEntry> = vec![];
+        let mut cur: Option<usize> = None;
+        apply_event_to_transcript(&mut t, &mut cur, &AgentEvent::TextDelta("final".into()));
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::TurnFinished {
+                iterations: 1,
+                hit_iteration_cap: false,
+            },
+        );
+        assert_eq!(names(&t), vec!["agent"]);
+        assert!(matches!(&t[0], TranscriptEntry::Agent(s) if s == "final"));
+    }
+
+    #[test]
+    fn tool_call_after_reasoning_finalizes_it() {
+        let mut t: Vec<TranscriptEntry> = vec![];
+        let mut cur: Option<usize> = None;
+        apply_event_to_transcript(&mut t, &mut cur, &AgentEvent::TextDelta("let me check".into()));
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::ToolCallStarted {
+                name: "run_query".into(),
+                sql: None,
+            },
+        );
+        apply_event_to_transcript(&mut t, &mut cur, &AgentEvent::TextDelta("the answer is 5".into()));
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::TurnFinished {
+                iterations: 2,
+                hit_iteration_cap: false,
+            },
+        );
+        assert_eq!(names(&t), vec!["reasoning", "step", "agent"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -60,8 +261,8 @@ pub enum TranscriptEntry {
 
 #[allow(dead_code)]
 pub struct App {
-    pub(crate) db: Database,
-    pub(crate) agent: Agent,
+    pub(crate) db: Arc<Mutex<Database>>,
+    pub(crate) agent_slot: Option<Agent>,
     pub(crate) mode: PermissionMode,
     pub(crate) profile_name: String,
     pub(crate) catastrophic_guard: bool,
@@ -71,6 +272,14 @@ pub struct App {
     pub(crate) last_result: Option<QueryResult>,
     pub(crate) transcript: Vec<TranscriptEntry>,
     pub(crate) should_quit: bool,
+    pub(crate) max_iterations: u32,
+    pub(crate) live: crate::live::LiveState,
+    pub(crate) quit_armed: bool,
+    /// Index of the in-progress streamed Reasoning entry, if any.
+    pub(crate) streaming_idx: Option<usize>,
+    pub(crate) inflight: Option<crate::turn::RunningTurn>,
+    pub(crate) event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<naque_llm::AgentEvent>>,
+    pub(crate) approval_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::approval::ApprovalRequest>>,
 }
 
 impl App {
@@ -82,9 +291,10 @@ impl App {
         catastrophic_guard: bool,
         row_cap: usize,
     ) -> Self {
+        let max_iterations = agent.max_iterations();
         Self {
-            db,
-            agent,
+            db: Arc::new(Mutex::new(db)),
+            agent_slot: Some(agent),
             mode,
             profile_name: profile_name.into(),
             catastrophic_guard,
@@ -94,6 +304,13 @@ impl App {
             last_result: None,
             transcript: Vec::new(),
             should_quit: false,
+            max_iterations,
+            live: crate::live::LiveState::new(max_iterations),
+            quit_armed: false,
+            streaming_idx: None,
+            inflight: None,
+            event_rx: None,
+            approval_rx: None,
         }
     }
 
@@ -111,6 +328,11 @@ impl App {
         &self.transcript
     }
 
+    #[cfg(test)]
+    pub(crate) fn transcript_mut(&mut self) -> &mut Vec<TranscriptEntry> {
+        &mut self.transcript
+    }
+
     pub fn usage(&self) -> &Usage {
         &self.usage
     }
@@ -123,6 +345,23 @@ impl App {
         self.schema.as_ref()
     }
 
+    /// Whether a raw SQL statement would be auto-approved by the gate in the
+    /// current mode (so it can run inline without a prompt).
+    pub async fn raw_sql_auto_approves(&self, sql: &str) -> bool {
+        use naque_core::gate::{GateDecision, gate_decision};
+        let dialect = engine_dialect(self.db.lock().await.engine());
+        let class = classify(sql, dialect);
+        matches!(
+            gate_decision(self.mode, &class, QueryKind::Primary, self.catastrophic_guard),
+            GateDecision::AutoApprove
+        )
+    }
+
+    /// Push an informational transcript entry.
+    pub fn push_info(&mut self, msg: impl Into<String>) {
+        self.transcript.push(TranscriptEntry::Info(msg.into()));
+    }
+
     // --- SQL execution -----------------------------------------------------
 
     /// Classify `sql`, run the permission gate, possibly prompt via `approver`,
@@ -133,10 +372,14 @@ impl App {
         kind: QueryKind,
         approver: &mut dyn Approver,
     ) -> Result<QueryResult, AppError> {
-        match run_gated(&mut self.db, self.mode, self.catastrophic_guard, sql, kind, approver).await {
+        let gate_result = {
+            let mut db = self.db.lock().await;
+            run_gated(&mut db, self.mode, self.catastrophic_guard, sql, kind, approver).await
+        };
+        match gate_result {
             Ok(result) => {
                 // Build a label from the classification for the transcript.
-                let dialect = engine_dialect(self.db.engine());
+                let dialect = engine_dialect(self.db.lock().await.engine());
                 let class = classify(sql, dialect);
                 let label = class
                     .statements
@@ -172,40 +415,25 @@ impl App {
 
     pub async fn handle_natural_language(&mut self, text: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
         self.transcript.push(TranscriptEntry::User(text.to_string()));
-
-        // Compute the catalog before splitting borrows.
         let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
 
-        // Destructure to satisfy the borrow checker: we need both
-        // `self.agent` (exclusive borrow for run_turn) and `self.db` (passed
-        // into the executor). Rust allows splitting borrows through field
-        // access when they are truly disjoint.
-        let App {
-            agent,
-            db,
-            mode,
-            catastrophic_guard,
-            schema,
-            ..
-        } = self;
-
+        let mut agent = self.agent_slot.take().expect("agent available");
         let mut executor = QueryToolExecutor {
-            db,
-            mode: *mode,
-            catastrophic_guard: *catastrophic_guard,
-            schema,
+            db: Arc::clone(&self.db),
+            mode: self.mode,
+            catastrophic_guard: self.catastrophic_guard,
+            schema: self.schema.clone(),
             approver,
             last_result: None,
         };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = agent.run_turn(text, &catalog, &mut executor, &mut (), &cancel).await;
+        let exec_last = executor.last_result.take();
+        self.agent_slot = Some(agent);
 
-        let turn = agent.run_turn(text, &catalog, &mut executor).await?;
-
-        // Pull results out of the executor before giving control back.
-        let exec_last_result = executor.last_result.take();
-
-        // Reassign the fields that were not covered by the destructure.
+        let turn = result?;
         self.usage += turn.usage;
-        if let Some(r) = exec_last_result {
+        if let Some(r) = exec_last {
             let mut capped = r;
             if capped.rows.len() > self.row_cap {
                 capped.rows.truncate(self.row_cap);
@@ -213,8 +441,157 @@ impl App {
             self.last_result = Some(capped);
         }
         self.transcript.push(TranscriptEntry::Agent(turn.answer));
-
         Ok(())
+    }
+
+    // --- Spawned turn (UI loop) --------------------------------------------
+
+    /// True when a new turn can be started: an agent is available and no turn
+    /// is currently in flight. The UI must gate `start_turn` on THIS, not just
+    /// `!is_turn_running()` (which diverges after a task panic loses the agent).
+    pub fn can_start_turn(&self) -> bool {
+        self.agent_slot.is_some() && self.inflight.is_none()
+    }
+
+    /// Spawn a natural-language turn on a background task. Takes the agent out
+    /// of the slot; events arrive via `next_event`, completion via `poll_finished`.
+    pub fn start_turn(&mut self, text: &str) {
+        if !self.can_start_turn() {
+            self.transcript.push(TranscriptEntry::Error(
+                "cannot start a new turn (agent unavailable or a turn is already running)".to_string(),
+            ));
+            return;
+        }
+        self.transcript.push(TranscriptEntry::User(text.to_string()));
+        self.streaming_idx = None;
+        self.live = crate::live::LiveState::new(self.max_iterations);
+        self.live.running = true;
+
+        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
+        // Safe: `can_start_turn` guaranteed the slot is full above.
+        let mut agent = self.agent_slot.take().expect("agent available");
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let db = std::sync::Arc::clone(&self.db);
+        let schema = self.schema.clone();
+        let mode = self.mode;
+        let guard = self.catastrophic_guard;
+        let input = text.to_string();
+        let cancel_task = cancel.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut observer = crate::turn::ChannelObserver::new(event_tx);
+            let mut approver = crate::approval::ChannelApprover::new(approval_tx);
+            let mut executor = crate::executor::QueryToolExecutor {
+                db,
+                mode,
+                catastrophic_guard: guard,
+                schema,
+                approver: &mut approver,
+                last_result: None,
+            };
+            let result = agent
+                .run_turn(&input, &catalog, &mut executor, &mut observer, &cancel_task)
+                .await;
+            let last_result = executor.last_result.take();
+            crate::turn::TurnOutput {
+                agent,
+                result,
+                last_result,
+            }
+        });
+
+        self.inflight = Some(crate::turn::RunningTurn { handle, cancel });
+        self.event_rx = Some(event_rx);
+        self.approval_rx = Some(approval_rx);
+    }
+
+    pub fn is_turn_running(&self) -> bool {
+        self.inflight.is_some()
+    }
+
+    /// Await the next streamed event, or `None` if the event channel is closed.
+    pub async fn next_event(&mut self) -> Option<naque_llm::AgentEvent> {
+        match self.event_rx.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
+    }
+
+    /// Non-blocking variant of `next_event` for draining remaining buffered events.
+    pub fn try_recv_event(&mut self) -> Option<naque_llm::AgentEvent> {
+        self.event_rx.as_mut().and_then(|rx| rx.try_recv().ok())
+    }
+
+    /// True once the spawned task has finished.
+    pub fn poll_finished(&mut self) -> bool {
+        self.inflight.as_mut().map(|t| t.handle.is_finished()).unwrap_or(false)
+    }
+
+    /// Apply one event to both the transcript and the live state.
+    pub fn apply_event(&mut self, event: &naque_llm::AgentEvent) {
+        apply_event_to_transcript(&mut self.transcript, &mut self.streaming_idx, event);
+        self.live.apply(event);
+    }
+
+    /// Cancel the in-flight turn, if any.
+    pub fn cancel_turn(&mut self) {
+        if let Some(t) = &self.inflight {
+            t.cancel.cancel();
+        }
+    }
+
+    /// Take the next pending approval request from a running turn, if any.
+    pub fn try_recv_approval(&mut self) -> Option<crate::approval::ApprovalRequest> {
+        self.approval_rx.as_mut().and_then(|rx| rx.try_recv().ok())
+    }
+
+    /// Reclaim the agent + results after the task has finished.
+    pub async fn finalize_turn(&mut self) {
+        let Some(t) = self.inflight.take() else { return };
+        let out = t.handle.await;
+
+        // The task has finished, so all events it produced are now buffered.
+        // Drain them so the final TurnFinished (which relabels the streamed
+        // reasoning into the Agent answer) is applied before we tear down.
+        while let Some(ev) = self.try_recv_event() {
+            self.apply_event(&ev);
+        }
+        self.event_rx = None;
+        self.approval_rx = None;
+
+        match out {
+            Ok(out) => {
+                self.agent_slot = Some(out.agent);
+                if let Some(r) = out.last_result {
+                    let mut capped = r;
+                    if capped.rows.len() > self.row_cap {
+                        capped.rows.truncate(self.row_cap);
+                    }
+                    self.last_result = Some(capped);
+                }
+                match out.result {
+                    Ok(turn) => {
+                        self.usage += turn.usage;
+                    },
+                    Err(e) => {
+                        self.transcript.push(TranscriptEntry::Error(e.to_string()));
+                    },
+                }
+            },
+            Err(join_err) => {
+                // Task panicked: the moved agent is lost. Surface the error;
+                // agent_slot stays None. The UI must refuse new turns while
+                // agent_slot is None (it gates on that) so this can't wedge.
+                self.transcript
+                    .push(TranscriptEntry::Error(format!("turn task failed: {join_err}")));
+            },
+        }
+        self.live.running = false;
+        self.streaming_idx = None;
     }
 
     // --- Command handlers --------------------------------------------------
@@ -223,7 +600,7 @@ impl App {
         let cmd = cmd.trim();
 
         if cmd == "reset" {
-            self.db.reconnect().await?;
+            self.db.lock().await.reconnect().await?;
             self.transcript.push(TranscriptEntry::Info("reconnected".to_string()));
             return Ok(());
         }
@@ -244,14 +621,16 @@ impl App {
                     rows_affected: None,
                 });
             } else {
-                let sql = match self.db.engine() {
+                // Live introspect.
+                let mut db = self.db.lock().await;
+                let sql = match db.engine() {
                     Engine::Sqlite => "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
                     Engine::Postgres => {
                         "SELECT table_name FROM information_schema.tables \
                          WHERE table_schema = 'public' ORDER BY table_name"
                     },
                 };
-                match self.db.fetch_readonly(sql).await {
+                match db.fetch_readonly(sql).await {
                     Ok(result) => {
                         let text = format_result_text(&result);
                         self.transcript.push(TranscriptEntry::Info(text));
@@ -307,13 +686,15 @@ impl App {
         }
 
         if cmd == "clear" {
-            self.agent.clear();
+            if let Some(a) = self.agent_slot.as_mut() {
+                a.clear();
+            }
             self.transcript.push(TranscriptEntry::Info("agent memory cleared".to_string()));
             return Ok(());
         }
 
         if cmd == "learn" {
-            match naque_schema::introspect(&mut self.db).await {
+            match naque_schema::introspect(&mut *self.db.lock().await).await {
                 Ok(model) => {
                     let count = model.tables.len();
                     self.schema = Some(model);
@@ -741,5 +1122,66 @@ pub mod tests {
         // The edited query returns only the row with id=1.
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Some("1".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use naque_llm::{AgentEvent, LlmResponse, Usage as LlmUsage};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn spawned_turn_streams_events_and_finalizes() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let resp = LlmResponse {
+            text: Some("hello".into()),
+            tool_calls: vec![],
+            usage: LlmUsage {
+                input_tokens: 4,
+                output_tokens: 2,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = tests::make_app(&url, PermissionMode::Wildcard, vec![resp]).await;
+
+        app.start_turn("hi");
+        assert!(app.is_turn_running());
+
+        let mut saw_finished = false;
+        loop {
+            if let Some(ev) = app.next_event().await {
+                if matches!(ev, AgentEvent::TurnFinished { .. }) {
+                    saw_finished = true;
+                }
+                app.apply_event(&ev);
+            } else if app.poll_finished() {
+                break;
+            }
+        }
+        assert!(saw_finished);
+        app.finalize_turn().await;
+
+        assert!(!app.is_turn_running());
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::Agent(s) if s == "hello"))
+        );
+        assert!(app.usage().input_tokens >= 4);
+        assert!(app.agent_slot.is_some());
+    }
+
+    #[tokio::test]
+    async fn start_turn_is_noop_without_agent() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = tests::make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        app.agent_slot = None; // simulate an agent lost to a panicked task
+        assert!(!app.can_start_turn());
+        app.start_turn("hi"); // must NOT panic
+        assert!(!app.is_turn_running());
+        assert!(app.transcript().iter().any(|e| matches!(e, TranscriptEntry::Error(_))));
     }
 }

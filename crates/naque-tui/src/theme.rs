@@ -93,6 +93,17 @@ impl Theme {
         }
     }
 
+    /// Style for the spinner + active-action text in the pinned line.
+    pub fn activity_style(&self) -> Style {
+        let base = Style::default().add_modifier(Modifier::BOLD);
+        if self.color { base.fg(Color::Cyan) } else { base }
+    }
+
+    /// Style for secondary/de-emphasized text (iteration, token count, hints).
+    pub fn dim_style(&self) -> Style {
+        Style::default().add_modifier(Modifier::DIM)
+    }
+
     /// Style for the highlighted (selected) row in the option picker.
     ///
     /// Always `REVERSED`; adds a color tint when color is enabled.
@@ -294,5 +305,17 @@ mod tests {
         if std::env::var_os("NO_COLOR").is_none() {
             assert!(Theme::detect().color);
         }
+    }
+
+    #[test]
+    fn activity_style_has_fg_with_color_none_without() {
+        assert!(Theme::new(true).activity_style().fg.is_some());
+        assert!(Theme::new(false).activity_style().fg.is_none());
+    }
+
+    #[test]
+    fn dim_style_uses_dim_modifier() {
+        assert!(Theme::new(true).dim_style().add_modifier.contains(Modifier::DIM));
+        assert!(Theme::new(false).dim_style().add_modifier.contains(Modifier::DIM));
     }
 }

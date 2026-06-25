@@ -1,7 +1,32 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use crate::{LlmError, LlmProvider, LlmRequest, LlmResponse, ToolCall, ToolExecutor};
+use crate::{LlmError, LlmProvider, LlmRequest, LlmResponse, TextSink, ToolCall, ToolExecutor, Usage};
+
+// ---------------------------------------------------------------------------
+// PendingProvider
+// ---------------------------------------------------------------------------
+
+/// Test provider whose streaming call never completes on its own — it awaits
+/// forever, so a cancellation race can interrupt it.
+pub struct PendingProvider;
+
+#[async_trait::async_trait]
+impl LlmProvider for PendingProvider {
+    fn name(&self) -> &str {
+        "pending"
+    }
+    async fn complete(&self, _req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        std::future::pending().await
+    }
+    async fn complete_streaming(
+        &self,
+        _req: &LlmRequest,
+        _on_text: &mut TextSink<'_>,
+    ) -> Result<LlmResponse, LlmError> {
+        std::future::pending().await
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MockProvider
@@ -98,5 +123,60 @@ impl ToolExecutor for MockExecutor {
             Some(Err(e)) => Err(LlmError::Tool(e.clone())),
             None => Ok(format!("(mock result for {})", call.name)),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScriptedStreamProvider
+// ---------------------------------------------------------------------------
+
+/// Test provider that streams pre-scripted text fragments per round-trip.
+pub struct ScriptedStreamProvider {
+    rounds: Mutex<VecDeque<Vec<String>>>,
+}
+
+impl ScriptedStreamProvider {
+    pub fn new<I, J, S>(rounds: I) -> Self
+    where
+        I: IntoIterator<Item = J>,
+        J: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let rounds = rounds
+            .into_iter()
+            .map(|frags| frags.into_iter().map(Into::into).collect::<Vec<_>>())
+            .collect();
+        Self {
+            rounds: Mutex::new(rounds),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ScriptedStreamProvider {
+    fn name(&self) -> &str {
+        "scripted-stream"
+    }
+
+    async fn complete(&self, _req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        Err(LlmError::Provider("ScriptedStreamProvider: use complete_streaming".into()))
+    }
+
+    async fn complete_streaming(&self, _req: &LlmRequest, on_text: &mut TextSink<'_>) -> Result<LlmResponse, LlmError> {
+        let frags = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
+        let mut text = String::new();
+        for f in &frags {
+            on_text(f);
+            text.push_str(f);
+        }
+        Ok(LlmResponse {
+            text: if text.is_empty() { None } else { Some(text) },
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            stop_reason: "end_turn".into(),
+        })
     }
 }

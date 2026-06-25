@@ -139,6 +139,11 @@ fn render_entry(e: &TranscriptEntry) {
         TranscriptEntry::Info(s) => println!("  Info: {s}"),
         TranscriptEntry::Error(s) => println!("  Error: {s}"),
         TranscriptEntry::Rejected(s) => println!("  Rejected: {s}"),
+        TranscriptEntry::Reasoning(s) => println!("  · {s}"),
+        TranscriptEntry::ToolStep { name, summary, .. } => {
+            let detail = summary.as_deref().unwrap_or("");
+            println!("  ▸ {name} {detail}");
+        },
     }
 }
 

@@ -4,19 +4,22 @@
 //! `explain`, `run_query`) to the database, going through the permission gate
 //! for anything that modifies state.
 
+use std::sync::Arc;
+
 use naque_core::gate::QueryKind;
 use naque_db::{Database, QueryResult};
 use naque_llm::{LlmError, ToolCall, ToolExecutor};
 use naque_schema::SchemaModel;
+use tokio::sync::Mutex;
 
 use crate::approval::Approver;
 use crate::run_gated;
 
 pub struct QueryToolExecutor<'a> {
-    pub db: &'a mut Database,
+    pub db: Arc<Mutex<Database>>,
     pub mode: naque_core::PermissionMode,
     pub catastrophic_guard: bool,
-    pub schema: &'a Option<SchemaModel>,
+    pub schema: Option<SchemaModel>,
     pub approver: &'a mut dyn Approver,
     pub last_result: Option<QueryResult>,
 }
@@ -47,14 +50,16 @@ impl QueryToolExecutor<'_> {
             return Ok(format!("error: invalid table name {name:?}"));
         }
 
-        if let Some(schema) = self.schema
+        if let Some(schema) = &self.schema
             && let Some(description) = schema.describe_table(name)
         {
             return Ok(description);
         }
 
+        let mut db = self.db.lock().await;
+
         // Fall back to a live introspection query.
-        let sql = match self.db.engine() {
+        let sql = match db.engine() {
             naque_db::Engine::Sqlite => {
                 format!("PRAGMA table_info('{name}')")
             },
@@ -68,7 +73,7 @@ impl QueryToolExecutor<'_> {
             },
         };
 
-        match self.db.fetch_readonly(&sql).await {
+        match db.fetch_readonly(&sql).await {
             Ok(result) => Ok(format_result_text(&result)),
             Err(e) => Ok(format!("error: {e}")),
         }
@@ -90,7 +95,8 @@ impl QueryToolExecutor<'_> {
 
         let sql = format!("SELECT * FROM {name} LIMIT {limit}");
 
-        match self.db.fetch_readonly(&sql).await {
+        let mut db = self.db.lock().await;
+        match db.fetch_readonly(&sql).await {
             Ok(result) => {
                 let text = format_result_text(&result);
                 self.last_result = Some(result);
@@ -109,7 +115,8 @@ impl QueryToolExecutor<'_> {
 
         let explain_sql = format!("EXPLAIN {sql}");
 
-        match self.db.fetch_readonly(&explain_sql).await {
+        let mut db = self.db.lock().await;
+        match db.fetch_readonly(&explain_sql).await {
             Ok(result) => Ok(format_result_text(&result)),
             Err(e) => Ok(format!("error: {e}")),
         }
@@ -122,7 +129,8 @@ impl QueryToolExecutor<'_> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| LlmError::Tool("run_query: missing 'sql'".to_string()))?;
 
-        match run_gated(self.db, self.mode, self.catastrophic_guard, sql, QueryKind::Primary, self.approver).await {
+        let mut db = self.db.lock().await;
+        match run_gated(&mut db, self.mode, self.catastrophic_guard, sql, QueryKind::Primary, self.approver).await {
             Ok(result) => {
                 let text = format_result_text(&result);
                 self.last_result = Some(result);
@@ -196,14 +204,13 @@ mod tests {
     async fn inspect_table_rejects_malicious_name() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let url = format!("sqlite:{}", tmp.path().display());
-        let mut db = Database::connect(&url).await.unwrap();
-        let schema: Option<SchemaModel> = None;
+        let db = Database::connect(&url).await.unwrap();
         let mut approver = AutoApprove;
         let mut exec = QueryToolExecutor {
-            db: &mut db,
+            db: Arc::new(Mutex::new(db)),
             mode: naque_core::PermissionMode::ReadOnly,
             catastrophic_guard: true,
-            schema: &schema,
+            schema: None,
             approver: &mut approver,
             last_result: None,
         };

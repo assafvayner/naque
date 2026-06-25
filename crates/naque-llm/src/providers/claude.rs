@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 
 use crate::{LlmError, LlmRequest, LlmResponse, Message, ToolCall, Usage};
@@ -171,5 +172,44 @@ impl crate::LlmProvider for ClaudeProvider {
         }
 
         Self::parse_response(&json)
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: &LlmRequest,
+        on_text: &mut crate::TextSink<'_>,
+    ) -> Result<LlmResponse, LlmError> {
+        let url = format!("{}/v1/messages", self.base_url);
+        let mut body = self.build_body(req);
+        body["stream"] = serde_json::Value::Bool(true);
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Provider(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Provider(format!("HTTP {status}: {text}")));
+        }
+
+        let mut acc = crate::streaming::AnthropicStreamAcc::new();
+        let mut sse = crate::streaming::SseBuffer::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| LlmError::Provider(e.to_string()))?;
+            sse.push(&chunk);
+            while let Some(data) = sse.next_event() {
+                acc.handle(&data, on_text);
+            }
+        }
+        Ok(acc.finish())
     }
 }

@@ -137,6 +137,51 @@ fn main() {
         ));
     }
 
+    // --- Frames 8 & 9: Live turn in progress ---
+    let live_app = rt.block_on(build_live_app());
+
+    // Frame 8: color
+    {
+        let theme = Theme::new(true);
+        let (w, h) = (110u16, 30u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| naque::ui::render(f, &live_app, &theme, "", None)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // Plain-text dump for legibility review (color frame).
+        println!("=== Frame 8: Live turn in progress — color (plain text) ===");
+        for y in 0..h {
+            let line: String = (0..w)
+                .map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
+                .collect();
+            println!("|{}", line.trim_end());
+        }
+
+        frames.push(("Frame 8: Live turn in progress — color (110×30)".to_string(), buffer_to_html(&buf)));
+    }
+
+    // Frame 9: NO_COLOR
+    {
+        let theme = Theme::new(false);
+        let (w, h) = (110u16, 30u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| naque::ui::render(f, &live_app, &theme, "", None)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // Plain-text dump for legibility review (no-color frame).
+        println!("=== Frame 9: Live turn in progress — NO_COLOR (plain text) ===");
+        for y in 0..h {
+            let line: String = (0..w)
+                .map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
+                .collect();
+            println!("|{}", line.trim_end());
+        }
+
+        frames.push(("Frame 9: Live turn in progress — NO_COLOR (110×30)".to_string(), buffer_to_html(&buf)));
+    }
+
     // Assemble HTML document.
     let html = build_html_document(&frames);
     std::fs::write(&out_path, &html).expect("write output file");
@@ -202,6 +247,49 @@ async fn build_populated_app() -> App {
     app.handle_natural_language("show me recent orders", &mut AutoApprove)
         .await
         .ok();
+
+    app
+}
+
+// ---------------------------------------------------------------------------
+// Live-turn app builder (Frames 8 & 9)
+// ---------------------------------------------------------------------------
+
+/// Build a minimal App whose live state shows a running turn: a streamed
+/// Reasoning entry followed by a Running ToolStep — no TurnFinished so
+/// `running` stays `true` and the pinned activity line is visible.
+async fn build_live_app() -> App {
+    use naque_llm::AgentEvent;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite:{}", tmp.path().display());
+    let db = Database::connect(&url).await.expect("connect");
+
+    let agent = Agent::new(
+        Box::new(MockProvider::new(vec![])),
+        AgentConfig {
+            model: "mock".to_string(),
+            max_iterations: 12,
+            max_tokens: 1024,
+            system_preamble: "You are a SQL assistant.".to_string(),
+        },
+    );
+
+    let mut app = App::new(db, agent, PermissionMode::Default, "prod-analytics", false, 12);
+
+    // Drive live state via the public apply_event path.
+    app.apply_event(&AgentEvent::TurnStarted);
+    app.apply_event(&AgentEvent::LlmCallStarted { iteration: 1 });
+    app.apply_event(&AgentEvent::TextDelta("Let me check the orders table.".into()));
+    app.apply_event(&AgentEvent::ToolCallStarted {
+        name: "run_query".into(),
+        sql: Some("SELECT count(*) FROM orders".into()),
+    });
+    app.apply_event(&AgentEvent::UsageUpdated(Usage {
+        input_tokens: 1200,
+        output_tokens: 48,
+    }));
+    // Do NOT send TurnFinished — we want running=true for the in-progress view.
 
     app
 }

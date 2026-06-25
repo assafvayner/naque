@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 
 use crate::{LlmError, LlmRequest, LlmResponse, Message, ToolCall, Usage};
@@ -166,6 +167,46 @@ pub(crate) async fn openai_chat_completion(
     openai_parse_response(&json)
 }
 
+/// Streaming variant of [`openai_chat_completion`]: POSTs with `stream: true`,
+/// forwards text deltas to `on_text`, and assembles the full response.
+pub(crate) async fn openai_chat_completion_streaming(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    req: &LlmRequest,
+    on_text: &mut crate::TextSink<'_>,
+) -> Result<LlmResponse, LlmError> {
+    let mut body = openai_build_body(req);
+    body["stream"] = Value::Bool(true);
+    body["stream_options"] = json!({ "include_usage": true });
+
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LlmError::Provider(e.to_string()))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(LlmError::Provider(format!("HTTP {status}: {text}")));
+    }
+
+    let mut acc = crate::streaming::OpenAiStreamAcc::new();
+    let mut sse = crate::streaming::SseBuffer::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| LlmError::Provider(e.to_string()))?;
+        sse.push(&chunk);
+        while let Some(data) = sse.next_event() {
+            acc.handle(&data, on_text);
+        }
+    }
+    Ok(acc.finish())
+}
+
 pub(crate) fn map_message(msg: &Message) -> Value {
     match msg {
         Message::User(s) => json!({ "role": "user", "content": s }),
@@ -214,5 +255,14 @@ impl crate::LlmProvider for OpenAIProvider {
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         openai_chat_completion(&self.client, &url, &self.api_key, req).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: &LlmRequest,
+        on_text: &mut crate::TextSink<'_>,
+    ) -> Result<LlmResponse, LlmError> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        openai_chat_completion_streaming(&self.client, &url, &self.api_key, req, on_text).await
     }
 }

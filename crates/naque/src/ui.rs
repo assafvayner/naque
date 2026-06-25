@@ -1,13 +1,14 @@
 //! TUI rendering and terminal event loop.
 
 use std::io;
+use std::time::Duration;
 
 use anyhow::Context;
-use naque_core::gate::GateDecision;
-use naque_tui::{ApprovalChoice, ApprovalPrompt, ResultTable, StatusBar, Theme};
+use futures_util::StreamExt;
+use naque_tui::{ActivityLine, ApprovalPrompt, ResultTable, StatusBar, Theme};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::ExecutableCommand;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -15,7 +16,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::app::{App, TranscriptEntry};
-use crate::approval::{ApprovalDecision, Approver};
+use crate::approval::{ApprovalDecision, ApprovalRequest};
 
 /// Rough cost estimate for the default model (claude-opus-4-8):
 /// $5 per 1M input tokens, $25 per 1M output tokens.
@@ -32,26 +33,30 @@ fn estimate_cost_usd(usage: &naque_llm::Usage) -> f64 {
 /// Layout (top to bottom):
 /// 1. Transcript area — scrollable list of history entries.
 /// 2. Result table — last query result, if any.
-/// 3. Approval prompt — overlaid when `pending` is Some.
-/// 4. Status bar — single line.
-/// 5. Input line — `> {input}`.
+/// 3. Activity line — pinned spinner row while a turn runs (height 0 when idle).
+/// 4. Approval prompt — overlaid when `pending` is Some.
+/// 5. Status bar — single line.
+/// 6. Input line — `> {input}`.
 pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending: Option<&ApprovalPrompt>) {
     let size = frame.area();
 
     // Determine heights: input = 1, status = 1, result = up to 8 if present,
-    // transcript = remainder. The approval prompt is no longer a layout band —
-    // it is drawn as a centered modal popup over the whole screen (below).
+    // activity = 1 while running (0 when idle), transcript = remainder.
+    // The approval prompt is no longer a layout band — it is drawn as a
+    // centered modal popup over the whole screen (below).
     let has_result = app.last_result().is_some();
 
     let result_height: u16 = if has_result { 8 } else { 0 };
+    let activity_height: u16 = if app.live.running { 1 } else { 0 };
     let fixed_bottom: u16 = 1 + 1; // status + input
-    let transcript_height = size.height.saturating_sub(fixed_bottom + result_height);
+    let transcript_height = size.height.saturating_sub(fixed_bottom + result_height + activity_height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(transcript_height),
             Constraint::Length(result_height),
+            Constraint::Length(activity_height),
             Constraint::Length(1), // status bar
             Constraint::Length(1), // input line
         ])
@@ -68,11 +73,14 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending:
         // Bottom-align: show the most recent entries adjacent to the result /
         // input area. Render only the last N lines that fit, and anchor them to
         // the bottom of the transcript chunk so there is no large empty gap at
-        // the top when the history is short.
+        // the top when the history is short. scroll_offset shifts the view up
+        // from the tail (0 = following tail).
         let chunk = chunks[0];
         let visible = chunk.height as usize;
-        let start = lines.len().saturating_sub(visible);
-        let tail: Vec<Line> = lines[start..].to_vec();
+        let off = app.live.scroll_offset as usize;
+        let end = lines.len().saturating_sub(off);
+        let start = end.saturating_sub(visible);
+        let tail: Vec<Line> = lines[start..end].to_vec();
         let used = tail.len() as u16;
         let pad = chunk.height.saturating_sub(used);
         let anchored = Rect {
@@ -84,6 +92,17 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending:
 
         let para = Paragraph::new(tail).block(Block::default()).wrap(Wrap { trim: false });
         frame.render_widget(para, anchored);
+
+        if !app.live.follow && app.live.new_below > 0 {
+            let hint = format!("↓ {} new", app.live.new_below);
+            let hint_area = Rect {
+                x: chunk.x,
+                y: chunk.y + chunk.height.saturating_sub(1),
+                width: chunk.width,
+                height: 1,
+            };
+            frame.render_widget(Paragraph::new(Line::from(Span::styled(hint, theme.dim_style()))), hint_area);
+        }
     }
 
     // ---- Result table -------------------------------------------------------
@@ -91,6 +110,21 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending:
         let table = ResultTable::new(result.columns.iter().map(|c| c.name.clone()).collect(), result.rows.clone());
         let buf = frame.buffer_mut();
         table.render(theme, chunks[1], buf);
+    }
+
+    // ---- Activity line ------------------------------------------------------
+    if app.live.running {
+        let usage = &app.live.live_usage;
+        let line = ActivityLine {
+            action: app.live.current_action.clone().unwrap_or_else(|| "working".into()),
+            spinner_frame: app.live.spinner_frame,
+            iteration: app.live.iteration,
+            max_iterations: app.live.max_iterations,
+            tokens: usage.input_tokens + usage.output_tokens,
+            awaiting_approval: app.live.awaiting_approval,
+        };
+        let buf = frame.buffer_mut();
+        line.render(theme, chunks[2], buf);
     }
 
     // ---- Status bar --------------------------------------------------------
@@ -107,13 +141,13 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending:
             cost_usd,
         };
         let buf = frame.buffer_mut();
-        bar.render(theme, chunks[2], buf);
+        bar.render(theme, chunks[3], buf);
     }
 
     // ---- Input line --------------------------------------------------------
     {
         let line = Line::from(Span::raw(format!("> {input}")));
-        frame.render_widget(Paragraph::new(line), chunks[3]);
+        frame.render_widget(Paragraph::new(line), chunks[4]);
     }
 
     // ---- Approval prompt (centered modal popup) ----------------------------
@@ -190,73 +224,31 @@ fn transcript_lines<'a>(entry: &'a TranscriptEntry, theme: &Theme) -> Vec<Line<'
         TranscriptEntry::Rejected(sql) => {
             vec![Line::from(Span::raw(format!("rej: {sql}")))]
         },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TuiApprover
-// ---------------------------------------------------------------------------
-
-/// An [`Approver`] that draws the approval prompt into a running terminal and
-/// waits for a keyboard decision.
-///
-/// Owns a `&mut Terminal` for the duration of the approval, so the calling
-/// loop must provide it for each prompt.
-pub struct TuiApprover<'a, B: ratatui::backend::Backend> {
-    pub terminal: &'a mut Terminal<B>,
-    pub app: &'a App,
-    pub theme: &'a Theme,
-    pub input: &'a str,
-}
-
-impl<B: ratatui::backend::Backend + Send> Approver for TuiApprover<'_, B> {
-    fn approve(&mut self, sql: &str, label: &str, decision: GateDecision) -> ApprovalDecision {
-        let catastrophic = match decision {
-            GateDecision::PromptCatastrophic => {
-                // Use a placeholder CatastrophicReason; the actual reason is embedded
-                // in the gate logic. We pass None for simplicity since the label
-                // already identifies the statement.
-                None
-            },
-            _ => None,
-        };
-
-        let mut prompt = ApprovalPrompt::new(sql.to_string(), label.to_string(), catastrophic, decision);
-
-        // Draw loop: render the frame with the pending prompt, wait for a key.
-        loop {
-            {
-                let app = self.app;
-                let theme = self.theme;
-                let input = self.input;
-                let prompt_ref = &prompt;
-                let _ = self.terminal.draw(|f| render(f, app, theme, input, Some(prompt_ref)));
-            }
-
-            if let Ok(Event::Key(key)) = event::read() {
-                // Ctrl-C during approval → reject.
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return ApprovalDecision::Reject;
-                }
-                if let Some(choice) = prompt.handle_key(key) {
-                    return match choice {
-                        ApprovalChoice::Accept => ApprovalDecision::Accept,
-                        ApprovalChoice::Reject => ApprovalDecision::Reject,
-                        ApprovalChoice::Edit => {
-                            // Inline edit: pre-fill with the current SQL. Esc cancels → Reject.
-                            let app = self.app;
-                            let theme = self.theme;
-                            match inline_edit(self.terminal, sql, |f, buf| {
-                                render_edit(f, app, theme, buf);
-                            }) {
-                                Some(edited) => ApprovalDecision::AcceptEdited(edited),
-                                None => ApprovalDecision::Reject,
-                            }
-                        },
-                    };
-                }
-            }
-        }
+        TranscriptEntry::Reasoning(text) => {
+            vec![Line::from(Span::styled(format!("  · {text}"), theme.dim_style()))]
+        },
+        TranscriptEntry::ToolStep {
+            name,
+            sql,
+            status,
+            summary,
+        } => {
+            let (glyph, glyph_style) = match status {
+                crate::app::StepStatus::Running => ("▸", theme.activity_style()),
+                crate::app::StepStatus::Ok => ("✓", theme.label_style("read-only")),
+                crate::app::StepStatus::Err => ("✗", theme.label_style("DDL: DROP")),
+            };
+            let detail = match status {
+                crate::app::StepStatus::Running => sql.clone().unwrap_or_default(),
+                _ => summary.clone().or_else(|| sql.clone()).unwrap_or_default(),
+            };
+            vec![Line::from(vec![
+                Span::raw("  "),
+                Span::styled(glyph, glyph_style),
+                Span::raw(format!(" {name} ")),
+                Span::styled(detail, theme.dim_style()),
+            ])]
+        },
     }
 }
 
@@ -266,9 +258,10 @@ impl<B: ratatui::backend::Backend + Send> Approver for TuiApprover<'_, B> {
 
 /// Enter raw mode + alternate screen, run the interactive loop, then restore.
 ///
-/// The `runtime` is passed so we can `block_on` the async `handle_line`
-/// without requiring `run` to be async (which would complicate terminal
-/// restore on error).
+/// The `runtime` is passed so we can `block_on` the async `event_loop` without
+/// requiring `run` to be async (which would complicate terminal restore on
+/// error). Natural-language turns run on tasks spawned via `start_turn` and
+/// stream live; the loop drains their events and drives approvals.
 pub fn run(mut app: App, theme: Theme, runtime: &tokio::runtime::Runtime) -> anyhow::Result<()> {
     // Enter raw mode and alternate screen.
     enable_raw_mode().context("enable raw mode")?;
@@ -282,7 +275,7 @@ pub fn run(mut app: App, theme: Theme, runtime: &tokio::runtime::Runtime) -> any
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     // The guard's Drop restores the terminal once `terminal`/`_guard` go out of scope.
-    event_loop(&mut app, &theme, &mut terminal, runtime)
+    runtime.block_on(event_loop(&mut app, &theme, &mut terminal))
 }
 
 /// Restores the terminal (leaves raw mode + alternate screen) when dropped.
@@ -298,89 +291,125 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn event_loop<B: ratatui::backend::Backend + Send>(
+async fn event_loop<B: ratatui::backend::Backend + Send>(
     app: &mut App,
     theme: &Theme,
     terminal: &mut Terminal<B>,
-    runtime: &tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
     let mut input_buf = String::new();
+    let mut events = EventStream::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(80));
+    let mut pending: Option<(ApprovalRequest, ApprovalPrompt)> = None;
 
     loop {
         {
-            let input = &input_buf;
-            terminal.draw(|f| render(f, app, theme, input, None))?;
+            let prompt_ref = pending.as_ref().map(|(_, p)| p);
+            terminal.draw(|f| render(f, app, theme, &input_buf, prompt_ref))?;
         }
 
-        let event = event::read().context("read terminal event")?;
+        tokio::select! {
+            maybe_ev = events.next() => {
+                let Some(Ok(Event::Key(key))) = maybe_ev else { continue };
+                if key.kind != KeyEventKind::Press { continue; }
 
-        match event {
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers,
-                ..
-            }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl-C → quit.
-                break;
-            },
-
-            Event::Key(KeyEvent {
-                code: KeyCode::Enter, ..
-            }) => {
-                let line = std::mem::take(&mut input_buf);
-                if line.trim().is_empty() {
+                // Approval modal active: route keys to the prompt.
+                if let Some((_, prompt)) = pending.as_mut() {
+                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        let (req, _) = pending.take().unwrap();
+                        let _ = req.reply.send(ApprovalDecision::Reject);
+                        continue;
+                    }
+                    if let Some(choice) = prompt.handle_key(key) {
+                        let (req, _) = pending.take().unwrap();
+                        let decision = approval_choice_to_decision(choice, &req.sql, terminal, app, theme);
+                        let _ = req.reply.send(decision);
+                    }
                     continue;
                 }
 
-                // Build a TuiApprover that borrows the terminal.
-                // We need to split the borrow: `app` is mutably borrowed by
-                // handle_line, and the approver needs a reference to `app` for
-                // rendering. To avoid the conflict we pass a snapshot of what
-                // the approver needs (profile_name, mode, theme) rather than
-                // borrowing `app` itself inside the approver. We accomplish this
-                // by using a simple struct that captures those cheaply-cloned fields.
-                let profile_snap = app.profile_name.clone();
-                let mode_snap = app.mode();
-                let usage_snap = app.usage().clone();
-
-                // Temporary app snapshot for the approver to render from.
-                // We use a Delayed-draw approach: the approver renders a static
-                // frame (no live transcript updates during approval). This avoids
-                // the borrow conflict entirely.
-                let snap_app = AppSnapshot {
-                    profile_name: profile_snap,
-                    mode: mode_snap,
-                    usage: usage_snap,
-                };
-
-                let mut approver = SnapshotApprover {
-                    terminal,
-                    snap: &snap_app,
-                    theme,
-                    input: "",
-                };
-
-                runtime.block_on(app.handle_line(&line, &mut approver))?;
-
-                if app.should_quit() {
-                    break;
+                // Ctrl+C: cancel a running turn, or arm/confirm quit when idle.
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if app.is_turn_running() {
+                        app.cancel_turn();
+                        app.quit_armed = false;
+                    } else if app.quit_armed {
+                        break;
+                    } else {
+                        app.quit_armed = true;
+                    }
+                    continue;
                 }
-            },
+                app.quit_armed = false;
 
-            Event::Key(KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            }) => {
-                input_buf.pop();
-            },
+                match key.code {
+                    KeyCode::Enter if !app.is_turn_running() => {
+                        let line = std::mem::take(&mut input_buf);
+                        if line.trim().is_empty() { continue; }
+                        dispatch_line(app, &line).await;
+                        if app.should_quit() { break; }
+                    },
+                    KeyCode::PageUp => {
+                        app.live.follow = false;
+                        app.live.scroll_offset = app.live.scroll_offset.saturating_add(5);
+                    },
+                    KeyCode::PageDown => {
+                        app.live.scroll_offset = app.live.scroll_offset.saturating_sub(5);
+                        if app.live.scroll_offset == 0 {
+                            app.live.follow = true;
+                            app.live.new_below = 0;
+                        }
+                    },
+                    KeyCode::End => {
+                        app.live.scroll_offset = 0;
+                        app.live.follow = true;
+                        app.live.new_below = 0;
+                    },
+                    KeyCode::Backspace if !app.is_turn_running() => { input_buf.pop(); },
+                    KeyCode::Char(c) if !app.is_turn_running() => { input_buf.push(c); },
+                    _ => {},
+                }
+            }
 
-            Event::Key(KeyEvent {
-                code: KeyCode::Char(c), ..
-            }) => {
-                input_buf.push(c);
-            },
+            _ = ticker.tick() => { app.live.tick(); }
 
-            _ => {},
+            // Disabled while an approval modal is up: the turn task is parked
+            // awaiting the approval oneshot, so it emits no events and there is
+            // nothing to drain. Leaving the arm enabled would busy-poll every
+            // 20ms for the whole time the user reads the prompt. When the user
+            // decides and `pending` clears, draining resumes (the unbounded
+            // channel buffers any events produced meanwhile, so nothing is lost).
+            step = turn_step(app), if app.is_turn_running() && pending.is_none() => {
+                match step {
+                    // A streamed event arrived — fold it into transcript + live state.
+                    TurnStep::Event(ev) => {
+                        if !app.live.follow { app.live.new_below = app.live.new_below.saturating_add(1); }
+                        app.apply_event(&ev);
+                    },
+                    // The spawned task finished — reclaim the agent + drain remaining
+                    // buffered events (finalize_turn does the draining itself).
+                    TurnStep::Finished => {
+                        app.finalize_turn().await;
+                    },
+                }
+            }
+        }
+
+        // Surface a pending approval request from the running turn as modal state.
+        if pending.is_none() {
+            if let Some(req) = app.try_recv_approval() {
+                let prompt = ApprovalPrompt::new(req.sql.clone(), req.label.clone(), None, req.decision);
+                app.live.awaiting_approval = true;
+                pending = Some((req, prompt));
+            }
+        } else if !app.is_turn_running() {
+            // Turn ended (e.g. cancelled) while a prompt was up — drop it.
+            if let Some((req, _)) = pending.take() {
+                let _ = req.reply.send(ApprovalDecision::Reject);
+            }
+        }
+        // Clear the awaiting_approval flag once the prompt is dismissed.
+        if pending.is_none() {
+            app.live.awaiting_approval = false;
         }
     }
 
@@ -388,116 +417,100 @@ fn event_loop<B: ratatui::backend::Backend + Send>(
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot approver — renders a static frame during the approval mini-loop.
+// Async event-loop helpers
 // ---------------------------------------------------------------------------
 
-/// A lightweight, borrow-safe snapshot of the fields needed for approval
-/// rendering without holding a live borrow on `App`.
-struct AppSnapshot {
-    profile_name: String,
-    mode: naque_core::PermissionMode,
-    usage: naque_llm::Usage,
+/// One step of progress on the in-flight turn.
+enum TurnStep {
+    /// The next streamed event from the turn task.
+    Event(naque_llm::AgentEvent),
+    /// The spawned task has finished (its channel closed or it joined).
+    Finished,
 }
 
-/// An [`Approver`] that draws approval prompts using an [`AppSnapshot`] so
-/// that the live `App` borrow can remain with `handle_line`.
-struct SnapshotApprover<'a, B: ratatui::backend::Backend> {
-    terminal: &'a mut Terminal<B>,
-    snap: &'a AppSnapshot,
-    theme: &'a Theme,
-    input: &'a str,
-}
-
-impl<B: ratatui::backend::Backend + Send> Approver for SnapshotApprover<'_, B> {
-    fn approve(&mut self, sql: &str, label: &str, decision: GateDecision) -> ApprovalDecision {
-        let mut prompt = ApprovalPrompt::new(sql.to_string(), label.to_string(), None, decision);
-
-        loop {
-            {
-                let snap = self.snap;
-                let theme = self.theme;
-                let input = self.input;
-                let prompt_ref = &prompt;
-                let _ = self.terminal.draw(|f| {
-                    render_snapshot(f, snap, theme, input, Some(prompt_ref));
-                });
-            }
-
-            if let Ok(Event::Key(key)) = event::read() {
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return ApprovalDecision::Reject;
-                }
-                if let Some(choice) = prompt.handle_key(key) {
-                    return match choice {
-                        ApprovalChoice::Accept => ApprovalDecision::Accept,
-                        ApprovalChoice::Reject => ApprovalDecision::Reject,
-                        ApprovalChoice::Edit => {
-                            // Inline edit: pre-fill with the current SQL. Esc cancels → Reject.
-                            let snap = self.snap;
-                            let theme = self.theme;
-                            match inline_edit(self.terminal, sql, |f, buf| {
-                                render_snapshot_edit(f, snap, theme, buf);
-                            }) {
-                                Some(edited) => ApprovalDecision::AcceptEdited(edited),
-                                None => ApprovalDecision::Reject,
-                            }
-                        },
-                    };
+/// Drive the in-flight turn one step: race the next streamed event against the
+/// task's completion. A single `&mut App` borrow keeps this usable from a
+/// `select!` arm (two separate arms would each borrow `app` and conflict).
+///
+/// Completion is detected two ways: the event channel closing (`next_event`
+/// returns `None`) or the join handle finishing. The latter is polled on a
+/// short cadence because the handle is owned by `app.inflight` and cannot be
+/// awaited directly here; the loop's tick keeps the UI responsive meanwhile.
+async fn turn_step(app: &mut App) -> TurnStep {
+    loop {
+        if app.poll_finished() {
+            return TurnStep::Finished;
+        }
+        tokio::select! {
+            biased;
+            maybe_event = app.next_event() => {
+                match maybe_event {
+                    Some(ev) => return TurnStep::Event(ev),
+                    None => return TurnStep::Finished,
                 }
             }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
     }
 }
 
-/// Render a frame using an [`AppSnapshot`] (no live transcript or result).
-fn render_snapshot(
-    frame: &mut Frame,
-    snap: &AppSnapshot,
-    theme: &Theme,
-    input: &str,
-    pending: Option<&ApprovalPrompt>,
-) {
-    let size = frame.area();
-    let transcript_height = size.height.saturating_sub(2);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(transcript_height),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(size);
-
-    frame.render_widget(Paragraph::new(""), chunks[0]);
-
-    {
-        let tokens = snap.usage.input_tokens + snap.usage.output_tokens;
-        let cost_usd = estimate_cost_usd(&snap.usage);
-        let bar = StatusBar {
-            profile: snap.profile_name.clone(),
-            mode: snap.mode,
-            in_transaction: false,
-            tokens,
-            cost_usd,
-        };
-        let buf = frame.buffer_mut();
-        bar.render(theme, chunks[1], buf);
+/// Route a submitted line. NL goes through the spawned streaming path; commands
+/// and raw SQL run inline (fast, no streaming).
+async fn dispatch_line(app: &mut App, line: &str) {
+    use naque_tui::{Input, route_input};
+    match route_input(line) {
+        Input::NaturalLanguage(text) => {
+            // `start_turn` records an explicit error when the agent is
+            // unavailable, so the user always sees why nothing happened.
+            app.start_turn(&text);
+        },
+        Input::RawSql(sql) => {
+            // Raw SQL runs inline. If the gate would auto-approve (e.g. wildcard,
+            // or a read in readonly), run it directly. If it would prompt, we
+            // cannot show the modal from this inline path yet (Task 4.7b wires
+            // raw-SQL approval through the modal) — surface an explicit message
+            // instead of silently approving or rejecting.
+            if app.raw_sql_auto_approves(&sql).await {
+                let _ = app
+                    .execute_sql(&sql, naque_core::gate::QueryKind::Primary, &mut crate::approval::AutoApprove)
+                    .await;
+            } else {
+                app.push_info(format!(
+                    "Raw SQL needs approval in {} mode; modal approval for raw SQL is coming in the next step. \
+                     Use `/mode wildcard` to run it now, or ask in natural language.",
+                    app.mode()
+                ));
+            }
+        },
+        Input::DbCommand(cmd) => {
+            let _ = app.handle_db_command(&cmd).await;
+        },
+        Input::ToolCommand(cmd) => {
+            let _ = app.handle_tool_command(&cmd, &mut crate::approval::AutoApprove).await;
+        },
+        Input::Empty => {},
     }
+}
 
-    frame.render_widget(Paragraph::new(Line::from(Span::raw(format!("> {input}")))), chunks[2]);
-
-    // Approval prompt — centered modal popup (drawn last, on top).
-    if let Some(prompt) = pending {
-        let modal = centered_modal_rect(size, prompt);
-        frame.render_widget(Clear, modal);
-
-        let block = Block::default().borders(Borders::ALL).title(" Approval required ");
-        let inner = block.inner(modal);
-        frame.render_widget(block, modal);
-
-        let buf = frame.buffer_mut();
-        prompt.render(theme, inner, buf);
+fn approval_choice_to_decision<B: ratatui::backend::Backend>(
+    choice: naque_tui::ApprovalChoice,
+    sql: &str,
+    terminal: &mut Terminal<B>,
+    app: &App,
+    theme: &Theme,
+) -> ApprovalDecision {
+    use naque_tui::ApprovalChoice;
+    match choice {
+        ApprovalChoice::Accept => ApprovalDecision::Accept,
+        ApprovalChoice::Reject => ApprovalDecision::Reject,
+        // `inline_edit` runs a synchronous `crossterm::event::read()` sub-loop.
+        // Safe to block here: the multi-thread runtime keeps the ticker alive on
+        // other workers, and the turn task is parked awaiting this approval, so
+        // no async work needs to progress during the edit.
+        ApprovalChoice::Edit => match inline_edit(terminal, sql, |f, buf| render_edit(f, app, theme, buf)) {
+            Some(edited) => ApprovalDecision::AcceptEdited(edited),
+            None => ApprovalDecision::Reject,
+        },
     }
 }
 
@@ -522,7 +535,7 @@ where
             let _ = terminal.draw(|f| draw_frame(f, buf_ref));
         }
 
-        if let Ok(Event::Key(key)) = event::read() {
+        if let Ok(Event::Key(key)) = ratatui::crossterm::event::read() {
             match key.code {
                 KeyCode::Enter => {
                     let trimmed = buf.trim();
@@ -568,37 +581,6 @@ fn render_edit(frame: &mut Frame, app: &App, theme: &Theme, edit_buf: &str) {
             in_transaction: false,
             tokens: app.usage().input_tokens + app.usage().output_tokens,
             cost_usd: estimate_cost_usd(app.usage()),
-        };
-        let buf = frame.buffer_mut();
-        bar.render(theme, chunks[1], buf);
-    }
-
-    frame.render_widget(Paragraph::new("edit SQL:"), chunks[2]);
-    frame.render_widget(Paragraph::new(Line::from(Span::raw(format!("> {edit_buf}")))), chunks[3]);
-}
-
-/// Render the edit-mode frame for the snapshot approver.
-fn render_snapshot_edit(frame: &mut Frame, snap: &AppSnapshot, theme: &Theme, edit_buf: &str) {
-    let size = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(size.height.saturating_sub(3)),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(size);
-
-    frame.render_widget(Paragraph::new("editing query (Enter to run, Esc to cancel)"), chunks[0]);
-
-    {
-        let bar = StatusBar {
-            profile: snap.profile_name.clone(),
-            mode: snap.mode,
-            in_transaction: false,
-            tokens: snap.usage.input_tokens + snap.usage.output_tokens,
-            cost_usd: estimate_cost_usd(&snap.usage),
         };
         let buf = frame.buffer_mut();
         bar.render(theme, chunks[1], buf);
@@ -753,5 +735,73 @@ mod tests {
         assert!(text.contains("hello"), "expected 'hello' in buffer:\n{text}");
         assert!(text.contains("my query"), "expected input:\n{text}");
         drop(tmp);
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    fn buffer_text(t: &Terminal<TestBackend>) -> String {
+        let buf = t.backend().buffer().clone();
+        let area = buf.area;
+        let width = area.width;
+        let height = area.height;
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = buf.cell((x, y)).unwrap();
+                out.push_str(cell.symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn renders_pinned_line_and_steps() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = crate::app::tests::make_app(&url, naque_core::PermissionMode::Wildcard, vec![]).await;
+
+        app.live.running = true;
+        app.live.current_action = Some("run_query".into());
+        app.live.iteration = 1;
+        app.transcript_mut().push(TranscriptEntry::Reasoning("checking orders".into()));
+        app.transcript_mut().push(TranscriptEntry::ToolStep {
+            name: "run_query".into(),
+            sql: Some("SELECT count(*) FROM orders".into()),
+            status: crate::app::StepStatus::Running,
+            summary: None,
+        });
+
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::new(true);
+        terminal.draw(|f| render(f, &app, &theme, "", None)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("run_query"), "pinned line/step missing: {text:?}");
+        assert!(text.contains("^C to cancel"), "cancel hint missing");
+        assert!(text.contains("checking orders"), "reasoning missing");
+    }
+
+    #[tokio::test]
+    async fn renders_legibly_without_color() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = crate::app::tests::make_app(&url, naque_core::PermissionMode::Wildcard, vec![]).await;
+        app.live.running = true;
+        app.live.current_action = Some("run_query".into());
+        app.live.iteration = 3;
+
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app, &Theme::new(false), "", None)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("run_query") && text.contains("iter 3/"), "{text:?}");
     }
 }

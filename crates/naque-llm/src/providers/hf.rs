@@ -1,4 +1,4 @@
-use super::openai::openai_chat_completion;
+use super::openai::{openai_chat_completion, openai_chat_completion_streaming};
 use crate::{LlmError, LlmRequest, LlmResponse};
 
 pub struct HfProvider {
@@ -34,5 +34,14 @@ impl crate::LlmProvider for HfProvider {
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         openai_chat_completion(&self.client, &url, &self.api_key, req).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: &LlmRequest,
+        on_text: &mut crate::TextSink<'_>,
+    ) -> Result<LlmResponse, LlmError> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        openai_chat_completion_streaming(&self.client, &url, &self.api_key, req, on_text).await
     }
 }

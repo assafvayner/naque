@@ -3,10 +3,15 @@
 pub mod app;
 pub mod approval;
 pub mod executor;
+pub mod live;
+pub mod turn;
 pub mod ui;
 
 pub use app::{App, AppError, TranscriptEntry};
-pub use approval::{ApprovalDecision, Approver, AutoApprove, AutoReject, ScriptedApprover};
+pub use approval::{
+    ApprovalDecision, ApprovalRequest, Approver, AutoApprove, AutoReject, ChannelApprover, ScriptedApprover,
+};
+pub use live::LiveState;
 use naque_core::PermissionMode;
 use naque_core::gate::{GateDecision, QueryKind, gate_decision};
 use naque_db::{Database, Engine, QueryResult};
@@ -49,7 +54,7 @@ pub async fn run_gated(
                 .map(|s| s.label.clone())
                 .unwrap_or_else(|| "SQL".to_string());
 
-            match approver.approve(sql, &label, decision) {
+            match approver.approve(sql, &label, decision).await {
                 AD::Accept => sql.to_string(),
                 AD::AcceptEdited(new_sql) => {
                     // Recurse: re-classify and re-gate the edited SQL.
