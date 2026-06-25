@@ -233,7 +233,6 @@ impl<B: ratatui::backend::Backend + Send> Approver for TuiApprover<'_, B> {
                 let _ = self.terminal.draw(|f| render(f, app, theme, input, Some(prompt_ref)));
             }
 
-            // Read a key event (blocking).
             if let Ok(Event::Key(key)) = event::read() {
                 // Ctrl-C during approval → reject.
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -308,13 +307,11 @@ fn event_loop<B: ratatui::backend::Backend + Send>(
     let mut input_buf = String::new();
 
     loop {
-        // Draw frame.
         {
             let input = &input_buf;
             terminal.draw(|f| render(f, app, theme, input, None))?;
         }
 
-        // Wait for an event.
         let event = event::read().context("read terminal event")?;
 
         match event {
@@ -472,10 +469,8 @@ fn render_snapshot(
         ])
         .split(size);
 
-    // Blank transcript area.
     frame.render_widget(Paragraph::new(""), chunks[0]);
 
-    // Status bar.
     {
         let tokens = snap.usage.input_tokens + snap.usage.output_tokens;
         let cost_usd = estimate_cost_usd(&snap.usage);
@@ -490,7 +485,6 @@ fn render_snapshot(
         bar.render(theme, chunks[1], buf);
     }
 
-    // Input line.
     frame.render_widget(Paragraph::new(Line::from(Span::raw(format!("> {input}")))), chunks[2]);
 
     // Approval prompt — centered modal popup (drawn last, on top).

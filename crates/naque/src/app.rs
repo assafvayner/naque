@@ -144,7 +144,6 @@ impl App {
                     .map(|s| s.label.clone())
                     .unwrap_or_else(|| "SQL".to_string());
 
-                // Cap rows for display.
                 let mut capped = result.clone();
                 if capped.rows.len() > self.row_cap {
                     capped.rows.truncate(self.row_cap);
@@ -245,7 +244,6 @@ impl App {
                     rows_affected: None,
                 });
             } else {
-                // Live introspect.
                 let sql = match self.db.engine() {
                     Engine::Sqlite => "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
                     Engine::Postgres => {

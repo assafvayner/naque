@@ -97,7 +97,6 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
     // Attempt typed decodes in priority order based on the column's declared type.
     // All branches fall through to the string fallback on mismatch.
 
-    // Integer types
     if matches!(
         tn.as_str(),
         "int8" | "bigint" | "int" | "integer" | "int4" | "int2" | "smallint" | "serial" | "bigserial"
@@ -113,7 +112,6 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
         }
     }
 
-    // Float types
     if matches!(tn.as_str(), "float8" | "double precision" | "float4" | "real" | "numeric" | "decimal") {
         if let Ok(v) = row.try_get::<f64, _>(i) {
             return Some(v.to_string());
@@ -123,35 +121,30 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
         }
     }
 
-    // Boolean
     if tn == "bool" || tn == "boolean" {
         if let Ok(v) = row.try_get::<bool, _>(i) {
             return Some(v.to_string());
         }
     }
 
-    // UUID
     if tn == "uuid" {
         if let Ok(v) = row.try_get::<sqlx::types::Uuid, _>(i) {
             return Some(v.to_string());
         }
     }
 
-    // JSON / JSONB
     if tn == "json" || tn == "jsonb" {
         if let Ok(v) = row.try_get::<sqlx::types::JsonValue, _>(i) {
             return Some(v.to_string());
         }
     }
 
-    // BigDecimal
     if tn == "numeric" || tn == "decimal" {
         if let Ok(v) = row.try_get::<sqlx::types::BigDecimal, _>(i) {
             return Some(v.to_string());
         }
     }
 
-    // Chrono date/time
     if tn.contains("timestamp") {
         if let Ok(v) = row.try_get::<sqlx::types::chrono::NaiveDateTime, _>(i) {
             return Some(v.to_string());
@@ -262,12 +255,10 @@ fn decode_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> Option<String>
         return Some(v);
     }
 
-    // Integer
     if let Ok(v) = row.try_get::<i64, _>(i) {
         return Some(v.to_string());
     }
 
-    // Float
     if let Ok(v) = row.try_get::<f64, _>(i) {
         return Some(v.to_string());
     }

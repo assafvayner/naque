@@ -408,8 +408,7 @@ fn color_to_css(color: ratatui::style::Color) -> &'static str {
         Color::LightMagenta => "#f6f",
         Color::LightCyan => "#6ff",
         Color::White => "#fff",
-        // Rgb and Indexed fall through — use a static string trick via a leak.
-        // In practice naque-tui only uses the named colors above.
+        // Rgb and Indexed have no fixed hex mapping; naque-tui only uses the named colors above.
         Color::Rgb(_, _, _) | Color::Indexed(_) => "inherit",
     }
 }
