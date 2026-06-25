@@ -439,13 +439,9 @@ impl App {
                 self.handle_natural_language(&text, approver).await?;
             }
             Input::RawSql(sql) => {
-                // Ignore Rejected gracefully — just record it in the transcript.
-                match self.execute_sql(&sql, QueryKind::Primary, approver).await {
-                    Ok(_) | Err(AppError::Rejected) => {}
-                    Err(e) => {
-                        self.transcript.push(TranscriptEntry::Error(e.to_string()));
-                    }
-                }
+                // `execute_sql` already records the outcome (Sql / Rejected / Error)
+                // in the transcript; don't double-record it here.
+                let _ = self.execute_sql(&sql, QueryKind::Primary, approver).await;
             }
             Input::DbCommand(cmd) => {
                 self.handle_db_command(&cmd).await?;
@@ -541,6 +537,29 @@ pub mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Some("1".to_string()));
         assert_eq!(result.rows[0][1], Some("a".to_string()));
+    }
+
+    // Regression: a failed raw SQL must record exactly ONE Error transcript
+    // entry (execute_sql records it; handle_line must not double-record).
+    #[tokio::test]
+    async fn raw_sql_error_recorded_once() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+
+        app.handle_line("!SELECT * FROM does_not_exist", &mut AutoApprove)
+            .await
+            .unwrap();
+
+        let errors = app
+            .transcript()
+            .iter()
+            .filter(|e| matches!(e, TranscriptEntry::Error(_)))
+            .count();
+        assert_eq!(
+            errors, 1,
+            "a failed raw SQL must record exactly one Error entry"
+        );
     }
 
     // ------------------------------------------------------------------
