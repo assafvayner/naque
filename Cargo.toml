@@ -8,5 +8,29 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.79"
 
 [workspace.dependencies]
-thiserror = "1"
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+keyring = "3"
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 sqlparser = "0.53"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "sqlite",
+    "chrono",
+    "uuid",
+    "json",
+    "bigdecimal",
+] }
+tempfile = "3"
+thiserror = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+toml = "0.8"
+urlencoding = "2"

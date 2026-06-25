@@ -6,19 +6,10 @@ license.workspace = true
 
 [dependencies]
 naque-core = { path = "../naque-core" }
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "sqlite",
-    "chrono",
-    "uuid",
-    "json",
-    "bigdecimal",
-] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
-thiserror = "1"
+sqlx.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tempfile.workspace = true
+tokio.workspace = true

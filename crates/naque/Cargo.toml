@@ -20,13 +20,13 @@ naque-schema  = { path = "../naque-schema" }
 naque-llm     = { path = "../naque-llm" }
 naque-tui     = { path = "../naque-tui" }
 naque-profile = { path = "../naque-profile" }
-async-trait   = "0.1"
-thiserror     = "1"
-tokio         = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
-clap          = { version = "4", features = ["derive"] }
-ratatui       = "0.29"
-anyhow        = "1"
+async-trait   = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+clap          = { workspace = true }
+ratatui       = { workspace = true }
+anyhow        = { workspace = true }
 
 [dev-dependencies]
-tempfile    = "3"
-serde_json  = "1"
+tempfile    = { workspace = true }
+serde_json  = { workspace = true }
