@@ -1,9 +1,11 @@
 use serde_json::{json, Value};
 
 use crate::{
-    ClaudeProvider, LlmProvider, LlmRequest, Message, OllamaProvider, OpenAIProvider, ToolCall,
-    ToolDef,
+    ClaudeProvider, HfProvider, LlmProvider, LlmRequest, Message, OllamaProvider, OpenAIProvider,
+    ToolCall, ToolDef,
 };
+
+use super::openai::{openai_build_body, openai_parse_response};
 
 fn make_request() -> LlmRequest {
     LlmRequest {
@@ -286,6 +288,144 @@ fn ollama_build_body_and_parse() {
 fn ollama_name() {
     let provider = OllamaProvider::new(None);
     assert_eq!(provider.name(), "ollama");
+}
+
+// ---------------------------------------------------------------------------
+// HfProvider tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hf_name() {
+    let provider = HfProvider::new("k".to_string(), None);
+    assert_eq!(provider.name(), "hf");
+}
+
+#[test]
+fn hf_build_body_reuses_openai_format() {
+    let req = LlmRequest {
+        model: "zai-org/GLM-5.2:together".to_string(),
+        system: "You are a test assistant.".to_string(),
+        messages: vec![Message::User("Hello".to_string())],
+        tools: vec![ToolDef {
+            name: "get_weather".to_string(),
+            description: "Get weather for a city".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            }),
+        }],
+        max_tokens: 300,
+    };
+
+    let body = openai_build_body(&req);
+
+    // Model string passed verbatim (including :provider suffix)
+    assert_eq!(body["model"], "zai-org/GLM-5.2:together");
+
+    // System message is first in messages array
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][0]["content"], "You are a test assistant.");
+
+    // User message next
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], "Hello");
+
+    // Tool is in OpenAI function wrapper format
+    let tool = &body["tools"][0];
+    assert_eq!(tool["type"], "function");
+    assert_eq!(tool["function"]["name"], "get_weather");
+    assert_eq!(tool["function"]["description"], "Get weather for a city");
+}
+
+#[test]
+fn openai_parse_response_empty_content_with_tool_calls() {
+    // Verify parser handles null/empty content + tool_calls (HF/OpenAI pattern)
+    let sample = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_hf_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": "{\"city\":\"Paris\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 42,
+            "completion_tokens": 12
+        }
+    });
+
+    let resp = openai_parse_response(&sample).unwrap();
+
+    assert!(resp.text.is_none(), "null content should yield None text");
+    assert_eq!(resp.tool_calls.len(), 1);
+    assert_eq!(resp.tool_calls[0].id, "call_hf_1");
+    assert_eq!(resp.tool_calls[0].name, "get_weather");
+    assert_eq!(resp.tool_calls[0].input["city"], "Paris");
+    assert_eq!(resp.stop_reason, "tool_calls");
+    assert_eq!(resp.usage.input_tokens, 42);
+    assert_eq!(resp.usage.output_tokens, 12);
+}
+
+// ---------------------------------------------------------------------------
+// HfProvider live test — skipped when HF_TOKEN is unset
+// ---------------------------------------------------------------------------
+//
+// Run with:
+//   source ~/hf/prod_token && cargo test -p naque-llm hf_live -- --nocapture
+
+#[tokio::test]
+async fn hf_live_tool_call() {
+    let key = match std::env::var("HF_TOKEN") {
+        Ok(k) => k,
+        Err(_) => {
+            eprintln!("[skip] HF_TOKEN not set — skipping live HF test");
+            return;
+        }
+    };
+
+    let provider = HfProvider::new(key, None);
+    let req = LlmRequest {
+        model: "zai-org/GLM-5.2:together".to_string(),
+        system: "".to_string(),
+        messages: vec![Message::User(
+            "Use the get_weather tool for Paris; do not answer in prose.".to_string(),
+        )],
+        tools: vec![ToolDef {
+            name: "get_weather".to_string(),
+            description: "Get the current weather for a city.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string", "description": "City name" }
+                },
+                "required": ["city"]
+            }),
+        }],
+        max_tokens: 300,
+    };
+
+    let resp = provider.complete(&req).await.expect("live HF call failed");
+
+    eprintln!("stop_reason: {}", resp.stop_reason);
+    eprintln!("text: {:?}", resp.text);
+    eprintln!("tool_calls: {:?}", resp.tool_calls);
+
+    // Accept either a tool call OR non-empty text — don't over-assert.
+    assert!(
+        !resp.tool_calls.is_empty() || resp.text.as_deref().is_some_and(|t| !t.is_empty()),
+        "expected at least one tool_call or non-empty text"
+    );
 }
 
 // ---------------------------------------------------------------------------

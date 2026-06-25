@@ -22,6 +22,14 @@ pub struct Args {
     /// Force no color output.
     #[arg(long = "no-color")]
     pub no_color: bool,
+
+    /// AI provider override (e.g. "hf", "openai", "claude").
+    #[arg(long)]
+    pub provider: Option<String>,
+
+    /// Model name override (e.g. "zai-org/GLM-5.2:together").
+    #[arg(long)]
+    pub model: Option<String>,
 }
 
 #[cfg(test)]
@@ -61,5 +69,19 @@ mod tests {
     fn url_arg_parsed() {
         let args = Args::try_parse_from(["naque", "--url", "postgres://localhost/mydb"]).unwrap();
         assert_eq!(args.url.as_deref(), Some("postgres://localhost/mydb"));
+    }
+
+    #[test]
+    fn provider_and_model_args_parsed() {
+        let args = Args::try_parse_from([
+            "naque",
+            "--provider",
+            "hf",
+            "--model",
+            "zai-org/GLM-5.2:together",
+        ])
+        .expect("parse failed");
+        assert_eq!(args.provider.as_deref(), Some("hf"));
+        assert_eq!(args.model.as_deref(), Some("zai-org/GLM-5.2:together"));
     }
 }

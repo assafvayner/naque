@@ -13,7 +13,10 @@ impl OpenAIProvider {
         Self {
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(concat!("naque/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("failed to build reqwest client"),
         }
     }
 
@@ -24,104 +27,120 @@ impl OpenAIProvider {
     }
 
     pub fn build_body(&self, req: &LlmRequest) -> Value {
-        let mut messages: Vec<Value> = Vec::new();
-        messages.push(json!({ "role": "system", "content": req.system }));
-        for msg in &req.messages {
-            messages.push(map_message(msg));
-        }
-
-        let mut body = json!({
-            "model": req.model,
-            "max_tokens": req.max_tokens,
-            "messages": messages,
-        });
-
-        if !req.tools.is_empty() {
-            let tools: Vec<Value> = req
-                .tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.input_schema,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = Value::Array(tools);
-        }
-
-        body
+        openai_build_body(req)
     }
 
     pub fn parse_response(json: &Value) -> Result<LlmResponse, LlmError> {
-        let choice = json
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|a| a.first())
-            .ok_or_else(|| LlmError::Provider("missing choices[0]".to_string()))?;
-
-        let message = choice
-            .get("message")
-            .ok_or_else(|| LlmError::Provider("missing message".to_string()))?;
-
-        let text = message
-            .get("content")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-
-        let tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|tc| {
-                        let id = tc.get("id")?.as_str()?.to_string();
-                        let func = tc.get("function")?;
-                        let name = func.get("name")?.as_str()?.to_string();
-                        let arguments_str = func.get("arguments")?.as_str().unwrap_or("{}");
-                        let input: Value = serde_json::from_str(arguments_str)
-                            .unwrap_or_else(|_| Value::String(arguments_str.to_string()));
-                        Some(ToolCall { id, name, input })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let stop_reason = choice
-            .get("finish_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        let usage = {
-            let u = json.get("usage");
-            Usage {
-                input_tokens: u
-                    .and_then(|v| v.get("prompt_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                output_tokens: u
-                    .and_then(|v| v.get("completion_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            }
-        };
-
-        Ok(LlmResponse {
-            text,
-            tool_calls,
-            usage,
-            stop_reason,
-        })
+        openai_parse_response(json)
     }
 }
 
-fn map_message(msg: &Message) -> Value {
+/// Build an OpenAI-compatible chat completions request body.
+///
+/// This is a free function so other providers (e.g. `HfProvider`) can reuse it
+/// without instantiating an `OpenAIProvider`.
+pub(crate) fn openai_build_body(req: &LlmRequest) -> Value {
+    let mut messages: Vec<Value> = Vec::new();
+    messages.push(json!({ "role": "system", "content": req.system }));
+    for msg in &req.messages {
+        messages.push(map_message(msg));
+    }
+
+    let mut body = json!({
+        "model": req.model,
+        "max_tokens": req.max_tokens,
+        "messages": messages,
+    });
+
+    if !req.tools.is_empty() {
+        let tools: Vec<Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                })
+            })
+            .collect();
+        body["tools"] = Value::Array(tools);
+    }
+
+    body
+}
+
+/// Parse an OpenAI-compatible chat completions response.
+///
+/// This is a free function so other providers (e.g. `HfProvider`) can reuse it
+/// without instantiating an `OpenAIProvider`.
+pub(crate) fn openai_parse_response(json: &Value) -> Result<LlmResponse, LlmError> {
+    let choice = json
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .ok_or_else(|| LlmError::Provider("missing choices[0]".to_string()))?;
+
+    let message = choice
+        .get("message")
+        .ok_or_else(|| LlmError::Provider("missing message".to_string()))?;
+
+    let text = message
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|tc| {
+                    let id = tc.get("id")?.as_str()?.to_string();
+                    let func = tc.get("function")?;
+                    let name = func.get("name")?.as_str()?.to_string();
+                    let arguments_str = func.get("arguments")?.as_str().unwrap_or("{}");
+                    let input: Value = serde_json::from_str(arguments_str)
+                        .unwrap_or_else(|_| Value::String(arguments_str.to_string()));
+                    Some(ToolCall { id, name, input })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let stop_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let usage = {
+        let u = json.get("usage");
+        Usage {
+            input_tokens: u
+                .and_then(|v| v.get("prompt_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            output_tokens: u
+                .and_then(|v| v.get("completion_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        }
+    };
+
+    Ok(LlmResponse {
+        text,
+        tool_calls,
+        usage,
+        stop_reason,
+    })
+}
+
+pub(crate) fn map_message(msg: &Message) -> Value {
     match msg {
         Message::User(s) => json!({ "role": "user", "content": s }),
         Message::Assistant { text, tool_calls } => {

@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context};
 use naque_core::PermissionMode;
 use naque_db::Database;
-use naque_llm::{Agent, AgentConfig, ClaudeProvider, OllamaProvider, OpenAIProvider};
+use naque_llm::{Agent, AgentConfig, ClaudeProvider, HfProvider, OllamaProvider, OpenAIProvider};
 use naque_profile::{NaqueConfig, Overrides, Store, SystemSecrets};
 use naque_tui::Theme;
 
@@ -36,6 +36,8 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
         url: args.url.clone(),
         config: NaqueConfig {
             mode: args.mode.clone(),
+            provider: args.provider.clone(),
+            model: args.model.clone(),
             ..Default::default()
         },
     };
@@ -76,6 +78,10 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
             Box::new(p)
         }
         Some("ollama") => Box::new(OllamaProvider::new(None)),
+        Some("hf") | Some("huggingface") => {
+            let p = HfProvider::from_env().map_err(|e| anyhow!("HF provider error: {e}"))?;
+            Box::new(p)
+        }
         // "claude" / "anthropic" / None → Claude
         _ => {
             let p =
@@ -126,6 +132,7 @@ fn default_model_for_provider(provider: Option<&str>) -> String {
     match provider {
         Some("openai") => "gpt-4o".to_string(),
         Some("ollama") => "llama3".to_string(),
+        Some("hf") | Some("huggingface") => "zai-org/GLM-5.2:together".to_string(),
         // claude / anthropic / None
         _ => "claude-opus-4-8".to_string(),
     }
