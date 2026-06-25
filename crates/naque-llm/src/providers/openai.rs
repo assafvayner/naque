@@ -1,0 +1,202 @@
+use serde_json::{json, Value};
+
+use crate::{LlmError, LlmRequest, LlmResponse, Message, ToolCall, Usage};
+
+pub struct OpenAIProvider {
+    api_key: String,
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl OpenAIProvider {
+    pub fn new(api_key: String, base_url: Option<String>) -> Self {
+        Self {
+            api_key,
+            base_url: base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub fn from_env() -> Result<Self, LlmError> {
+        let key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| LlmError::Provider("OPENAI_API_KEY not set".to_string()))?;
+        Ok(Self::new(key, None))
+    }
+
+    pub fn build_body(&self, req: &LlmRequest) -> Value {
+        let mut messages: Vec<Value> = Vec::new();
+        messages.push(json!({ "role": "system", "content": req.system }));
+        for msg in &req.messages {
+            messages.push(map_message(msg));
+        }
+
+        let mut body = json!({
+            "model": req.model,
+            "max_tokens": req.max_tokens,
+            "messages": messages,
+        });
+
+        if !req.tools.is_empty() {
+            let tools: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema,
+                        }
+                    })
+                })
+                .collect();
+            body["tools"] = Value::Array(tools);
+        }
+
+        body
+    }
+
+    pub fn parse_response(json: &Value) -> Result<LlmResponse, LlmError> {
+        let choice = json
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .ok_or_else(|| LlmError::Provider("missing choices[0]".to_string()))?;
+
+        let message = choice
+            .get("message")
+            .ok_or_else(|| LlmError::Provider("missing message".to_string()))?;
+
+        let text = message
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|tc| {
+                        let id = tc.get("id")?.as_str()?.to_string();
+                        let func = tc.get("function")?;
+                        let name = func.get("name")?.as_str()?.to_string();
+                        let arguments_str = func.get("arguments")?.as_str().unwrap_or("{}");
+                        let input: Value = serde_json::from_str(arguments_str)
+                            .unwrap_or_else(|_| Value::String(arguments_str.to_string()));
+                        Some(ToolCall { id, name, input })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let stop_reason = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let usage = {
+            let u = json.get("usage");
+            Usage {
+                input_tokens: u
+                    .and_then(|v| v.get("prompt_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                output_tokens: u
+                    .and_then(|v| v.get("completion_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            }
+        };
+
+        Ok(LlmResponse {
+            text,
+            tool_calls,
+            usage,
+            stop_reason,
+        })
+    }
+}
+
+fn map_message(msg: &Message) -> Value {
+    match msg {
+        Message::User(s) => json!({ "role": "user", "content": s }),
+        Message::Assistant { text, tool_calls } => {
+            let mut obj = json!({
+                "role": "assistant",
+                "content": text.as_deref().unwrap_or(""),
+            });
+            if !tool_calls.is_empty() {
+                let tc: Vec<Value> = tool_calls
+                    .iter()
+                    .map(|call| {
+                        let arguments =
+                            serde_json::to_string(&call.input).unwrap_or_else(|_| "{}".to_string());
+                        json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": arguments,
+                            }
+                        })
+                    })
+                    .collect();
+                obj["tool_calls"] = Value::Array(tc);
+            }
+            obj
+        }
+        Message::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } => {
+            json!({
+                "role": "tool",
+                "tool_call_id": tool_use_id,
+                "content": content,
+            })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::LlmProvider for OpenAIProvider {
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let body = self.build_body(req);
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Provider(e.to_string()))?;
+
+        let status = resp.status();
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Provider(e.to_string()))?;
+
+        if !status.is_success() {
+            let msg = json
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(LlmError::Provider(format!("HTTP {status}: {msg}")));
+        }
+
+        Self::parse_response(&json)
+    }
+}
