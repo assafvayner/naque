@@ -8,7 +8,9 @@ use futures_util::StreamExt;
 use naque_tui::{ActivityLine, ApprovalPrompt, InputLine, ResultTable, StatusBar, Theme};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::ExecutableCommand;
-use ratatui::crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use ratatui::crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -319,6 +321,11 @@ pub fn run(mut app: App, theme: Theme, runtime: &tokio::runtime::Runtime) -> any
     // whether `run` returns early via `?`, completes normally, or unwinds on panic.
     let _guard = TerminalGuard;
 
+    // Enable mouse capture so the scroll wheel reaches us. Done after the guard
+    // is in place so a failure here still tears down raw mode + alt screen; the
+    // guard's DisableMouseCapture is a harmless no-op if this never ran.
+    io::stdout().execute(EnableMouseCapture).context("enable mouse capture")?;
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -334,6 +341,7 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = io::stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(LeaveAlternateScreen);
     }
@@ -423,6 +431,18 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
 
         tokio::select! {
             maybe_ev = events.next() => {
+                // Mouse wheel scrolls the transcript. Ignored while an approval
+                // modal owns focus (consistent with key routing below).
+                if let Some(Ok(Event::Mouse(m))) = &maybe_ev {
+                    if pending.is_none() {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => app.live.scroll_up(3),
+                            MouseEventKind::ScrollDown => app.live.scroll_down(3),
+                            _ => {},
+                        }
+                    }
+                    continue;
+                }
                 let Some(Ok(Event::Key(key))) = maybe_ev else { continue };
                 if key.kind != KeyEventKind::Press { continue; }
 
