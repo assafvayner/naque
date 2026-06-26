@@ -954,6 +954,39 @@ impl App {
             return Ok(());
         }
 
+        if cmd == "context" || cmd.starts_with("context ") {
+            let Some(store) = self.store.clone() else {
+                self.transcript
+                    .push(TranscriptEntry::Info("no active profile; use /save first".into()));
+                return Ok(());
+            };
+            let Some(profile) = self.active_profile.clone() else {
+                self.transcript
+                    .push(TranscriptEntry::Info("no active profile; use /save first".into()));
+                return Ok(());
+            };
+            let path = store.context_path(&profile);
+            let note = cmd.strip_prefix("context").map(str::trim).unwrap_or("");
+            if note.is_empty() {
+                match std::fs::read_to_string(&path) {
+                    Ok(doc) => {
+                        self.active_context = Some(doc.clone());
+                        self.transcript.push(TranscriptEntry::Info(doc));
+                    },
+                    Err(_) => self
+                        .transcript
+                        .push(TranscriptEntry::Info("no context saved for this profile".into())),
+                }
+            } else {
+                let current = std::fs::read_to_string(&path).unwrap_or_default();
+                let updated = naque_schema::append_note(&current, note);
+                std::fs::write(&path, &updated).map_err(|e| AppError::Other(e.to_string()))?;
+                self.active_context = Some(updated);
+                self.transcript.push(TranscriptEntry::Info("note added to context".into()));
+            }
+            return Ok(());
+        }
+
         // Silence the unused parameter warning in the non-NL paths.
         let _ = approver;
 
@@ -1377,6 +1410,37 @@ pub mod tests {
     // ------------------------------------------------------------------
     // Test 8: AcceptEdited re-gates and runs the new SQL
     // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn context_command_shows_and_appends_notes() {
+        use naque_profile::{Profile, Store};
+        let home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+
+        let store = Store::open(home.path());
+        store.save_profile("shop", &Profile::default()).unwrap();
+        std::fs::write(store.context_path("shop"), naque_schema::assemble_context("shop", "### t", "ov", "first note"))
+            .unwrap();
+        app.set_active_profile(store.clone(), Some("shop".into()), Some("dev".into()), None);
+        app.active_context = std::fs::read_to_string(store.context_path("shop")).ok();
+
+        app.handle_line("/context the orders table is append-only", &mut AutoApprove)
+            .await
+            .unwrap();
+        let on_disk = std::fs::read_to_string(store.context_path("shop")).unwrap();
+        assert!(on_disk.contains("first note"));
+        assert!(on_disk.contains("append-only"));
+        assert!(app.active_context.as_ref().unwrap().contains("append-only"));
+
+        app.handle_line("/context", &mut AutoApprove).await.unwrap();
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::Info(s) if s.contains("append-only")))
+        );
+    }
 
     #[tokio::test]
     async fn accept_edited_reruns_new_sql() {
