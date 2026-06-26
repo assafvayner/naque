@@ -520,8 +520,10 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                         } else if is_cmd("/save") {
                             let args = trimmed.strip_prefix("/save").map(str::trim).unwrap_or("");
                             handle_save_command(app, theme, terminal, args).await;
+                        } else if is_cmd("/learn") {
+                            handle_learn_command(app, theme, terminal).await;
                         } else {
-                            dispatch_line(app, &line).await;
+                            dispatch_line(app, terminal, theme, &line).await;
                         }
                         if app.should_quit() {
                             break;
@@ -647,12 +649,18 @@ async fn turn_step(app: &mut App) -> TurnStep {
 
 /// Route a submitted line. NL goes through the spawned streaming path; commands
 /// and raw SQL run inline (fast, no streaming).
-async fn dispatch_line(app: &mut App, line: &str) {
+async fn dispatch_line<B: ratatui::backend::Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    theme: &Theme,
+    line: &str,
+) {
     use naque_tui::{Input, route_input};
     match route_input(line) {
         Input::NaturalLanguage(text) => {
             // `start_turn` records an explicit error when the agent is
-            // unavailable, so the user always sees why nothing happened.
+            // unavailable, so the user always sees why nothing happened. The
+            // spawned turn streams its own live progress, so it is not wrapped.
             app.start_turn(&text);
         },
         Input::RawSql(sql) => {
@@ -662,9 +670,9 @@ async fn dispatch_line(app: &mut App, line: &str) {
             // raw-SQL approval through the modal) — surface an explicit message
             // instead of silently approving or rejecting.
             if app.raw_sql_auto_approves(&sql).await {
-                let _ = app
-                    .execute_sql(&sql, naque_core::gate::QueryKind::Primary, &mut crate::approval::AutoApprove)
-                    .await;
+                let mut approver = crate::approval::AutoApprove;
+                let fut = app.execute_sql(&sql, naque_core::gate::QueryKind::Primary, &mut approver);
+                let _ = run_with_spinner(terminal, theme, "Running query…", fut).await;
             } else {
                 app.push_info(format!(
                     "Raw SQL needs approval in {} mode; modal approval for raw SQL is coming in the next step. \
@@ -674,7 +682,13 @@ async fn dispatch_line(app: &mut App, line: &str) {
             }
         },
         Input::DbCommand(cmd) => {
-            let _ = app.handle_db_command(&cmd).await;
+            let label = if cmd.trim() == "reset" {
+                "Reconnecting…"
+            } else {
+                "Working…"
+            };
+            let fut = app.handle_db_command(&cmd);
+            let _ = run_with_spinner(terminal, theme, label, fut).await;
         },
         Input::ToolCommand(cmd) => {
             let _ = app.handle_tool_command(&cmd, &mut crate::approval::AutoApprove).await;
@@ -826,7 +840,9 @@ async fn handle_profile_command<B: ratatui::backend::Backend>(
     let Some(ei) = run_picker(terminal, theme, "environment", envs.clone()) else {
         return;
     };
-    if let Err(e) = app.switch_to(&profile, &envs[ei]).await {
+    let env = envs[ei].clone();
+    let fut = app.switch_to(&profile, &env);
+    if let Err(e) = run_with_spinner(terminal, theme, &format!("Connecting to {profile}/{env}…"), fut).await {
         app.push_info(format!("switch failed: {e}"));
     }
 }
@@ -846,58 +862,63 @@ async fn handle_env_command<B: ratatui::backend::Backend>(app: &mut App, theme: 
     let Some(ei) = run_picker(terminal, theme, "environment", envs.clone()) else {
         return;
     };
-    if let Err(e) = app.switch_to(&profile, &envs[ei]).await {
+    let env = envs[ei].clone();
+    let fut = app.switch_to(&profile, &env);
+    if let Err(e) = run_with_spinner(terminal, theme, &format!("Connecting to {profile}/{env}…"), fut).await {
         app.push_info(format!("switch failed: {e}"));
     }
 }
 
-/// Drive `fut` to completion while animating a labelled spinner on the bottom
-/// row. The completion arm is `biased` ahead of the ticker so a ready future
-/// returns immediately and is never starved by the timer.
-async fn run_with_spinner<B, T, Fut>(terminal: &mut Terminal<B>, app: &App, theme: &Theme, label: &str, fut: Fut) -> T
+const SPINNER_GRACE: Duration = Duration::from_millis(120);
+const SPINNER_TICK: Duration = Duration::from_millis(80);
+
+/// Drive `fut` to completion while showing a centered "busy" modal once it has
+/// run longer than a short grace period (so fast operations never flash it).
+/// The modal touches only `theme`/`label`, so `fut` may borrow `&mut App`.
+async fn run_with_spinner<B, T, Fut>(terminal: &mut Terminal<B>, theme: &Theme, label: &str, fut: Fut) -> T
 where
     B: ratatui::backend::Backend,
     Fut: std::future::Future<Output = T>,
 {
     tokio::pin!(fut);
-    let mut ticker = tokio::time::interval(Duration::from_millis(80));
-    let empty = InputLine::new();
+    let start = tokio::time::Instant::now() + SPINNER_GRACE;
+    let mut ticker = tokio::time::interval_at(start, SPINNER_TICK);
     let mut frame_idx = 0usize;
-    let mut draw = |terminal: &mut Terminal<B>| {
-        let spinner = naque_tui::SPINNER_FRAMES[frame_idx % naque_tui::SPINNER_FRAMES.len()];
-        frame_idx = frame_idx.wrapping_add(1);
-        let _ = terminal.draw(|f| {
-            render(f, app, theme, &empty, None);
-            render_busy(f, theme, spinner, label);
-        });
-    };
-    // Draw the first frame up front so the label appears immediately, rather
-    // than after the first 80ms tick.
-    draw(terminal);
     loop {
         tokio::select! {
             biased;
             out = &mut fut => return out,
-            _ = ticker.tick() => draw(terminal),
+            _ = ticker.tick() => {
+                let spinner = naque_tui::SPINNER_FRAMES[frame_idx % naque_tui::SPINNER_FRAMES.len()];
+                frame_idx = frame_idx.wrapping_add(1);
+                let _ = terminal.draw(|f| render_busy(f, theme, spinner, label));
+            }
         }
     }
 }
 
-/// Overlay `⟨spinner⟩ ⟨label⟩` on the bottom (input) row while a slow phase runs.
+/// Draw a small centered modal showing `⟨spinner⟩ ⟨label⟩` while a slow phase
+/// runs. Touches only `theme`/`label`/spinner so it can coexist with a future
+/// that borrows `&mut App`.
 fn render_busy(frame: &mut Frame, theme: &Theme, spinner: &str, label: &str) {
     let area = frame.area();
-    if area.height == 0 {
+    if area.width == 0 || area.height == 0 {
         return;
     }
-    let row = Rect {
-        x: 0,
-        y: area.height - 1,
-        width: area.width,
-        height: 1,
+    let width = (label.chars().count() as u16 + 6).min(area.width);
+    let height = 3.min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
     };
-    frame.render_widget(Clear, row);
+    frame.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL).title(" working ");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
     let line = Line::from(Span::styled(format!("{spinner} {label}"), theme.activity_style()));
-    frame.render_widget(Paragraph::new(line), row);
+    frame.render_widget(Paragraph::new(line).alignment(ratatui::layout::Alignment::Center), inner);
 }
 
 /// Interactive `/save`: animate a phase-labelled spinner across the two slow
@@ -913,7 +934,7 @@ async fn handle_save_command<B: ratatui::backend::Backend>(
     };
     if app.schema().is_none() {
         let fut = app.introspect_future();
-        match run_with_spinner(terminal, app, theme, "Learning schema…", fut).await {
+        match run_with_spinner(terminal, theme, "Learning schema…", fut).await {
             Ok(model) => {
                 let n = model.tables.len();
                 app.set_schema(model);
@@ -930,13 +951,28 @@ async fn handle_save_command<B: ratatui::backend::Backend>(
         return;
     };
     let fut = app.overview_future(schema_md);
-    let (agent, outcome) = run_with_spinner(terminal, app, theme, "Generating overview…", fut).await;
+    let (agent, outcome) = run_with_spinner(terminal, theme, "Generating overview…", fut).await;
     app.restore_agent(agent);
     if let Some(err) = outcome.error {
         app.push_info(format!("overview generation failed: {err}"));
     }
     if let Err(e) = app.finish_save(&profile, &env, &outcome.text) {
         app.push_info(format!("save failed: {e}"));
+    }
+}
+
+/// Interactive `/learn`: introspect the schema with a progress spinner.
+async fn handle_learn_command<B: ratatui::backend::Backend>(app: &mut App, theme: &Theme, terminal: &mut Terminal<B>) {
+    let fut = app.introspect_future();
+    match run_with_spinner(terminal, theme, "Learning schema…", fut).await {
+        Ok(model) => {
+            let n = model.tables.len();
+            app.set_schema(model);
+            app.push_info(format!("learned {n} table(s)"));
+        },
+        Err(e) => {
+            app.push_info(format!("learn failed: {e}"));
+        },
     }
 }
 
@@ -1126,14 +1162,13 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_spinner_returns_future_output() {
-        let app = make_test_app().await;
         let theme = Theme::new(false);
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        // With `biased;` the completion arm wins immediately, so an already-ready
-        // future returns its value without waiting on the timer.
-        let out = run_with_spinner(&mut terminal, &app, &theme, "Working…", async { 42usize }).await;
+        // With `biased;` and the grace period, an already-ready future returns
+        // its value immediately, drawing nothing.
+        let out = run_with_spinner(&mut terminal, &theme, "Working…", async { 42usize }).await;
         assert_eq!(out, 42);
     }
 }
@@ -1230,24 +1265,13 @@ mod render_tests {
         assert!(buffer_text(&terminal).contains("again to exit"), "hint must show when quit_armed");
     }
 
-    #[tokio::test]
-    async fn run_with_spinner_draws_label() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let url = format!("sqlite:{}", tmp.path().display());
-        let app = crate::app::tests::make_app(&url, naque_core::PermissionMode::Wildcard, vec![]).await;
-        let theme = Theme::new(true);
+    #[test]
+    fn render_busy_shows_label() {
+        let theme = Theme::new(false);
         let backend = TestBackend::new(60, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-
-        // `yield_now` forces at least one ticker draw before the future resolves,
-        // so `render_busy` runs at least once.
-        let out = run_with_spinner(&mut terminal, &app, &theme, "Learning schema…", async {
-            tokio::task::yield_now().await;
-            7usize
-        })
-        .await;
-        assert_eq!(out, 7);
-        assert!(buffer_text(&terminal).contains("Learning schema"), "spinner label must be drawn on the bottom row");
+        terminal.draw(|f| render_busy(f, &theme, "⠋", "Learning schema…")).unwrap();
+        assert!(buffer_text(&terminal).contains("Learning schema"), "busy modal must show its label");
     }
 
     #[test]
