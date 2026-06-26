@@ -40,11 +40,28 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # NAQUE_TEST_PG_URL points the integration tests at the Postgres service
+    # below; SQLite integration tests run against temp files with no setup.
+    env:
+      NAQUE_TEST_PG_URL: postgres://naque:naque@localhost:5432/naque
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: naque
+          POSTGRES_PASSWORD: naque
+          POSTGRES_DB: naque
+        ports:
+          - 5432:5432
+        # Gate the job's steps on the DB accepting connections.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # NAQUE_TEST_PG_URL is left unset, so the Postgres integration tests skip
-      # cleanly; SQLite integration tests run against temp files with no setup.
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
