@@ -722,6 +722,54 @@ where
     }
 }
 
+// Wired to /profile and /env in the next task.
+#[allow(dead_code)]
+fn run_picker<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    theme: &Theme,
+    title: &str,
+    options: Vec<String>,
+) -> Option<usize> {
+    use naque_tui::{Picker, PickerOption, PickerOutcome};
+    if options.is_empty() {
+        return None;
+    }
+    let count = options.len();
+    let mut picker = Picker::new(
+        options
+            .into_iter()
+            .map(|label| PickerOption { label, shortcut: None })
+            .collect(),
+    );
+    loop {
+        let _ = terminal.draw(|f| {
+            let area = f.area();
+            let h = (count as u16 + 2).min(area.height);
+            let rect = Rect {
+                x: 0,
+                y: area.height.saturating_sub(h),
+                width: area.width,
+                height: h,
+            };
+            f.render_widget(Clear, rect);
+            let block = Block::default().borders(Borders::ALL).title(format!(" {title} "));
+            let inner = block.inner(rect);
+            f.render_widget(block, rect);
+            picker.render(theme, inner, f.buffer_mut());
+        });
+        if let Ok(Event::Key(key)) = ratatui::crossterm::event::read() {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return None;
+            }
+            match picker.handle_key(key) {
+                Some(PickerOutcome::Selected(i)) => return Some(i),
+                Some(PickerOutcome::Cancelled) => return None,
+                None => {},
+            }
+        }
+    }
+}
+
 /// Render the edit-mode frame for the live-`App` approver.
 fn render_edit(frame: &mut Frame, app: &App, theme: &Theme, edit_buf: &str) {
     let size = frame.area();
