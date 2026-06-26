@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod approval;
+pub mod commands;
 pub mod input;
 pub mod input_line;
 pub mod picker;
@@ -11,6 +12,7 @@ pub mod theme;
 
 pub use activity::{ActivityLine, SPINNER_FRAMES};
 pub use approval::{ApprovalChoice, ApprovalPrompt};
+pub use commands::{SLASH_COMMANDS, SlashCommand, help_text, matching};
 pub use input::{Input, route_input};
 pub use input_line::{InputLine, InputView};
 pub use picker::{Picker, PickerOption, PickerOutcome};

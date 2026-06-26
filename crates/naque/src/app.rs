@@ -721,6 +721,12 @@ impl App {
     pub async fn handle_tool_command(&mut self, cmd: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
         let cmd = cmd.trim();
 
+        // Bare `/` or `/help` shows the command reference.
+        if cmd.is_empty() || cmd == "help" {
+            self.transcript.push(TranscriptEntry::Info(naque_tui::help_text()));
+            return Ok(());
+        }
+
         if let Some(rest) = cmd.strip_prefix("mode ") {
             match rest.trim().parse::<PermissionMode>() {
                 Ok(m) => {
@@ -1088,6 +1094,14 @@ pub mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let url = format!("sqlite:{}", tmp.path().display());
         let mut app = make_app(&url, PermissionMode::Default, vec![]).await;
+
+        // /help — lists the slash commands.
+        app.handle_line("/help", &mut AutoApprove).await.unwrap();
+        let has_help = app
+            .transcript()
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::Info(s) if s.contains("Slash commands:") && s.contains("/mode")));
+        assert!(has_help, "transcript should contain the help listing");
 
         // /mode readonly
         app.handle_line("/mode readonly", &mut AutoApprove).await.unwrap();
