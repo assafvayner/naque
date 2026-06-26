@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod approval;
 pub mod commands;
+pub mod history;
 pub mod input;
 pub mod input_line;
 pub mod markdown;
@@ -15,6 +16,7 @@ pub mod theme;
 pub use activity::{ActivityLine, SPINNER_FRAMES};
 pub use approval::{ApprovalChoice, ApprovalPrompt};
 pub use commands::{SLASH_COMMANDS, SlashCommand, help_text, matching};
+pub use history::History;
 pub use input::{Input, route_input};
 pub use input_line::{InputLine, InputView};
 pub use markdown::render_markdown;

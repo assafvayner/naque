@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::StreamExt;
-use naque_tui::{ActivityLine, ApprovalPrompt, InputLine, ResultTable, StatusBar, Theme};
+use naque_tui::{ActivityLine, ApprovalPrompt, History, InputLine, ResultTable, StatusBar, Theme};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::ExecutableCommand;
 use ratatui::crossterm::event::{
@@ -397,6 +397,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
     terminal: &mut Terminal<B>,
 ) -> anyhow::Result<()> {
     let mut input = InputLine::new();
+    let mut history = History::new();
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(80));
     let mut pending: Option<(ApprovalRequest, ApprovalPrompt)> = None;
@@ -509,6 +510,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                         if line.trim().is_empty() {
                             continue;
                         }
+                        history.push(&line);
                         let trimmed = line.trim();
                         let is_cmd = |c: &str| trimmed == c || trimmed.starts_with(&format!("{c} "));
                         if is_cmd("/profile") {
@@ -531,6 +533,17 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                     KeyCode::Right if editable => input.move_right(),
                     KeyCode::Home if editable => input.move_home(),
                     KeyCode::End if editable => input.move_end(),
+                    // Up/Down recall session history (popup intercepts these when open).
+                    KeyCode::Up if editable => {
+                        if let Some(text) = history.prev(input.text()) {
+                            input.set_text(text);
+                        }
+                    },
+                    KeyCode::Down if editable => {
+                        if let Some(text) = history.next() {
+                            input.set_text(text);
+                        }
+                    },
                     KeyCode::Char('a') if editable && ctrl => input.move_home(),
                     KeyCode::Char('e') if editable && ctrl => input.move_end(),
                     KeyCode::Delete if editable => input.delete(),
