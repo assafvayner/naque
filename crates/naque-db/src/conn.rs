@@ -94,6 +94,13 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
 
     let tn = type_name.to_ascii_lowercase();
 
+    // Arrays: sqlx names them with a trailing "[]" (e.g. "INT4[]"). Decode by
+    // element type. Checked before the scalar branches since array names never
+    // collide with scalar names.
+    if let Some(elem) = tn.strip_suffix("[]") {
+        return decode_pg_array(row, i, elem);
+    }
+
     // Attempt typed decodes in priority order based on the column's declared type.
     // All branches fall through to the string fallback on mismatch.
 
@@ -164,6 +171,83 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
         return Some(v.to_string());
     }
 
+    if tn == "interval"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgInterval, _>(i)
+    {
+        return Some(format_pg_interval(&v));
+    }
+    if tn == "int4range"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgRange<i32>, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "int8range"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgRange<i64>, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "numrange"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgRange<sqlx::types::BigDecimal>, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "tsrange"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgRange<sqlx::types::chrono::NaiveDateTime>, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "tstzrange"
+        && let Ok(v) =
+            row.try_get::<sqlx::postgres::types::PgRange<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "daterange"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgRange<sqlx::types::chrono::NaiveDate>, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "money"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgMoney, _>(i)
+    {
+        return Some(format_pg_money(v));
+    }
+    if tn == "hstore"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgHstore, _>(i)
+    {
+        return Some(format_pg_hstore(&v));
+    }
+    if tn == "ltree"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgLTree, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "lquery"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::PgLQuery, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "oid"
+        && let Ok(v) = row.try_get::<sqlx::postgres::types::Oid, _>(i)
+    {
+        return Some(v.0.to_string());
+    }
+    if (tn == "inet" || tn == "cidr")
+        && let Ok(v) = row.try_get::<sqlx::types::ipnetwork::IpNetwork, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if tn == "macaddr"
+        && let Ok(v) = row.try_get::<sqlx::types::mac_address::MacAddress, _>(i)
+    {
+        return Some(v.to_string());
+    }
+    if (tn == "bit" || tn == "varbit")
+        && let Ok(v) = row.try_get::<sqlx::types::BitVec, _>(i)
+    {
+        return Some(format_bit_vec(&v));
+    }
+
     // Bytea → hex string
     if tn == "bytea"
         && let Ok(v) = row.try_get::<Vec<u8>, _>(i)
@@ -191,6 +275,56 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
 
     // Non-panicking placeholder
     Some(format!("<unrenderable:{}>", type_name))
+}
+
+/// Decode a Postgres array cell whose element type name is `elem` (already
+/// lowercased, no `[]`). Falls back to a placeholder for element types we don't
+/// render (composite, geometric, multi-dim, etc.).
+fn decode_pg_array(row: &sqlx::postgres::PgRow, i: usize, elem: &str) -> Option<String> {
+    use sqlx::Row as _;
+
+    macro_rules! try_arr {
+        ($t:ty) => {{
+            if let Ok(v) = row.try_get::<Vec<Option<$t>>, _>(i) {
+                return Some(format_array(&v));
+            }
+        }};
+    }
+
+    macro_rules! try_arr_with {
+        ($t:ty, $render:expr) => {{
+            if let Ok(v) = row.try_get::<Vec<Option<$t>>, _>(i) {
+                return Some(format_array_with(&v, $render));
+            }
+        }};
+    }
+
+    match elem {
+        "int2" | "smallint" => try_arr!(i16),
+        "int4" | "int" | "integer" => try_arr!(i32),
+        "int8" | "bigint" => try_arr!(i64),
+        "float4" | "real" => try_arr!(f32),
+        "float8" | "double precision" => try_arr!(f64),
+        "numeric" | "decimal" => try_arr!(sqlx::types::BigDecimal),
+        "bool" | "boolean" => try_arr!(bool),
+        "text" | "varchar" | "name" | "bpchar" | "char" | "citext" => try_arr!(String),
+        "uuid" => try_arr!(sqlx::types::Uuid),
+        "date" => try_arr!(sqlx::types::chrono::NaiveDate),
+        "time" => try_arr!(sqlx::types::chrono::NaiveTime),
+        "timestamp" => try_arr!(sqlx::types::chrono::NaiveDateTime),
+        "timestamptz" => try_arr!(sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>),
+        "interval" => try_arr_with!(sqlx::postgres::types::PgInterval, format_pg_interval),
+        "money" => {
+            try_arr_with!(sqlx::postgres::types::PgMoney, |m: &sqlx::postgres::types::PgMoney| { format_pg_money(*m) })
+        },
+        "oid" => try_arr_with!(sqlx::postgres::types::Oid, |o: &sqlx::postgres::types::Oid| o.0.to_string()),
+        "inet" | "cidr" => try_arr!(sqlx::types::ipnetwork::IpNetwork),
+        "macaddr" => try_arr!(sqlx::types::mac_address::MacAddress),
+        "bit" | "varbit" => try_arr_with!(sqlx::types::BitVec, format_bit_vec),
+        _ => {},
+    }
+
+    Some(format!("<unrenderable:{elem}[]>"))
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +421,6 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 /// Render a Postgres INTERVAL roughly as psql does, e.g.
 /// `1 year 2 mons 3 days 04:05:06`. Months/days/microseconds are stored
 /// independently, so the time part can exceed 24h and carries its own sign.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_pg_interval(iv: &sqlx::postgres::types::PgInterval) -> String {
     let mut parts: Vec<String> = Vec::new();
     let (years, mons) = (iv.months / 12, iv.months % 12);
@@ -317,13 +450,11 @@ pub(crate) fn format_pg_interval(iv: &sqlx::postgres::types::PgInterval) -> Stri
 
 /// Render a Postgres MONEY value. Assumes the common locale `frac_digits = 2`
 /// (whole cents); no currency symbol since the client does not know the locale.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_pg_money(m: sqlx::postgres::types::PgMoney) -> String {
     m.to_bigdecimal(2).to_string()
 }
 
 /// Render a Postgres HSTORE as `"k1"=>"v1", "k2"=>NULL`, keys in map order.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_pg_hstore(h: &sqlx::postgres::types::PgHstore) -> String {
     h.0.iter()
         .map(|(k, v)| match v {
@@ -335,19 +466,23 @@ pub(crate) fn format_pg_hstore(h: &sqlx::postgres::types::PgHstore) -> String {
 }
 
 /// Render a Postgres BIT / VARBIT as a string of `0`/`1`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_bit_vec(b: &sqlx::types::BitVec) -> String {
     b.iter().map(|bit| if bit { '1' } else { '0' }).collect()
 }
 
 /// Render a decoded Postgres array as `{a,b,c}` (array-literal style), with
 /// `NULL` for null elements.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_array<T: std::fmt::Display>(items: &[Option<T>]) -> String {
+    format_array_with(items, |v| v.to_string())
+}
+
+/// Like [`format_array`] but with a custom per-element renderer, for element
+/// types that do not implement `Display` (interval, money, oid, bit).
+fn format_array_with<T>(items: &[Option<T>], render: impl Fn(&T) -> String) -> String {
     let inner = items
         .iter()
         .map(|o| match o {
-            Some(v) => v.to_string(),
+            Some(v) => render(v),
             None => "NULL".to_string(),
         })
         .collect::<Vec<_>>()
@@ -447,5 +582,11 @@ mod format_tests {
     fn array_join_with_null() {
         assert_eq!(format_array(&[Some(1), None, Some(3)]), "{1,NULL,3}");
         assert_eq!(format_array::<i32>(&[]), "{}");
+    }
+
+    #[test]
+    fn array_with_custom_renderer() {
+        let items = [Some(5_u32), None, Some(7_u32)];
+        assert_eq!(super::format_array_with(&items, |n| format!("#{n}")), "{#5,NULL,#7}");
     }
 }
