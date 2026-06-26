@@ -148,6 +148,22 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending:
     {
         let line = Line::from(Span::raw(format!("> {input}")));
         frame.render_widget(Paragraph::new(line), chunks[4]);
+
+        // After a first idle Ctrl+C, prompt the user that another press exits.
+        if app.quit_armed {
+            let hint = "press ^C again to exit";
+            let hint_w = hint.len() as u16;
+            let input_chunk = chunks[4];
+            if input_chunk.width > hint_w {
+                let hint_area = Rect {
+                    x: input_chunk.x + input_chunk.width - hint_w,
+                    y: input_chunk.y,
+                    width: hint_w,
+                    height: 1,
+                };
+                frame.render_widget(Paragraph::new(Line::from(Span::styled(hint, theme.dim_style()))), hint_area);
+            }
+        }
     }
 
     // ---- Approval prompt (centered modal popup) ----------------------------
@@ -803,5 +819,24 @@ mod render_tests {
         terminal.draw(|f| render(f, &app, &Theme::new(false), "", None)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("run_query") && text.contains("iter 3/"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn renders_quit_hint_only_when_armed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = crate::app::tests::make_app(&url, naque_core::PermissionMode::Wildcard, vec![]).await;
+
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Idle, not armed: no hint.
+        terminal.draw(|f| render(f, &app, &Theme::new(true), "", None)).unwrap();
+        assert!(!buffer_text(&terminal).contains("again to exit"), "hint must not show when idle");
+
+        // After a first idle Ctrl+C: the hint appears.
+        app.quit_armed = true;
+        terminal.draw(|f| render(f, &app, &Theme::new(true), "", None)).unwrap();
+        assert!(buffer_text(&terminal).contains("again to exit"), "hint must show when quit_armed");
     }
 }
