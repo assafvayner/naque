@@ -266,7 +266,14 @@ async fn pg_renders_common_types() {
              '192.168.1.0/24'::cidr AS net, \
              '08:00:2b:01:02:03'::macaddr AS mac, \
              B'101'::bit(3) AS bits, \
-             12345::oid AS the_oid",
+             12345::oid AS the_oid, \
+             1.50::numeric AS num, \
+             ARRAY[1.50, 2.00]::numeric[] AS numarr, \
+             ARRAY[INTERVAL '1 day', INTERVAL '2 hours'] AS ivarr, \
+             ARRAY['$1.50'::money, '$2.00'::money] AS moneyarr, \
+             ARRAY[10, 20]::oid[] AS oidarr, \
+             ARRAY[B'101'::bit(3), B'010'::bit(3)] AS bitarr, \
+             ARRAY['08:00:2b:01:02:03'::macaddr] AS macarr",
         )
         .await
         .expect("SELECT common types");
@@ -288,6 +295,16 @@ async fn pg_renders_common_types() {
     assert_eq!(cell("mac"), "08:00:2b:01:02:03");
     assert_eq!(cell("bits"), "101");
     assert_eq!(cell("the_oid"), "12345");
+    // numeric renders losslessly via BigDecimal (not lossy f64). sqlx's
+    // numeric->BigDecimal keeps base-10000 group precision, hence the extra zeros.
+    assert_eq!(cell("num"), "1.5000");
+    assert_eq!(cell("numarr"), "{1.5000,2}");
+    // Array element types that lack Display, rendered via format_array_with.
+    assert_eq!(cell("ivarr"), "{1 day,02:00:00}");
+    assert_eq!(cell("moneyarr"), "{1.50,2.00}");
+    assert_eq!(cell("oidarr"), "{10,20}");
+    assert_eq!(cell("bitarr"), "{101,010}");
+    assert_eq!(cell("macarr"), "{08:00:2b:01:02:03}");
 
     // No cell should be an unrenderable placeholder.
     for (c, v) in result.columns.iter().zip(row.iter()) {
