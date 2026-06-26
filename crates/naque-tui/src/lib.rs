@@ -8,6 +8,7 @@ pub mod input_line;
 pub mod picker;
 pub mod result_table;
 pub mod status_bar;
+pub mod suggest;
 pub mod theme;
 
 pub use activity::{ActivityLine, SPINNER_FRAMES};
@@ -18,4 +19,5 @@ pub use input_line::{InputLine, InputView};
 pub use picker::{Picker, PickerOption, PickerOutcome};
 pub use result_table::ResultTable;
 pub use status_bar::StatusBar;
+pub use suggest::SlashSuggest;
 pub use theme::Theme;

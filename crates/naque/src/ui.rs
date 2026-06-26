@@ -318,6 +318,50 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// The text after a leading `/` while it is still a single bare word (no
+/// whitespace) — the prefix the autocomplete popup filters on. `None` when the
+/// input is not currently typing a slash command.
+fn slash_suggest_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    if rest.contains(char::is_whitespace) {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// Text to drop into the input when completing `cmd`. Commands that take
+/// arguments get a trailing space so the cursor lands ready for the argument
+/// (and the trailing space closes the popup); argument-less commands do not.
+fn complete_slash(cmd: &naque_tui::SlashCommand) -> String {
+    if cmd.args.is_empty() {
+        format!("/{}", cmd.name)
+    } else {
+        format!("/{} ", cmd.name)
+    }
+}
+
+/// Draw the autocomplete popup as a floating box just above the input line.
+fn render_suggest_popup(frame: &mut Frame, theme: &Theme, sg: &naque_tui::SlashSuggest) {
+    let area = frame.area();
+    if area.height < 4 || area.width < 6 {
+        return;
+    }
+    // The input line is the bottom row; grow the popup upward from just above it.
+    let input_row = area.height.saturating_sub(1);
+    let height = sg.preferred_height().min(input_row).max(3);
+    let width = (sg.content_width() + 2).min(area.width).max(10);
+    let top = input_row.saturating_sub(height);
+    let popup = Rect {
+        x: area.x,
+        y: top,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    sg.render(theme, popup, frame.buffer_mut());
+}
+
 async fn event_loop<B: ratatui::backend::Backend + Send>(
     app: &mut App,
     theme: &Theme,
@@ -327,11 +371,33 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(80));
     let mut pending: Option<(ApprovalRequest, ApprovalPrompt)> = None;
+    // Slash-command autocomplete: highlighted row + an Esc-dismissed flag.
+    let mut suggest_selected: usize = 0;
+    let mut suggest_dismissed = false;
 
     loop {
+        // Re-arm the popup once the input is no longer a slash command.
+        if !input.text().starts_with('/') {
+            suggest_dismissed = false;
+            suggest_selected = 0;
+        }
+
+        // Build the autocomplete popup for this frame, if it should show.
+        let suggest = if pending.is_none() && !app.is_turn_running() && !suggest_dismissed {
+            let matches = slash_suggest_prefix(input.text()).map(naque_tui::matching).unwrap_or_default();
+            (!matches.is_empty()).then(|| naque_tui::SlashSuggest::new(matches, suggest_selected))
+        } else {
+            None
+        };
+
         {
             let prompt_ref = pending.as_ref().map(|(_, p)| p);
-            terminal.draw(|f| render(f, app, theme, &input, prompt_ref))?;
+            terminal.draw(|f| {
+                render(f, app, theme, &input, prompt_ref);
+                if let Some(sg) = suggest.as_ref() {
+                    render_suggest_popup(f, theme, sg);
+                }
+            })?;
         }
 
         tokio::select! {
@@ -368,6 +434,32 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 }
                 app.quit_armed = false;
 
+                // Slash-command popup is open: intercept navigation/complete/dismiss.
+                if let Some(sg) = suggest.as_ref() {
+                    match key.code {
+                        KeyCode::Up => {
+                            suggest_selected = suggest_selected.saturating_sub(1);
+                            continue;
+                        },
+                        KeyCode::Down => {
+                            suggest_selected = (suggest_selected + 1).min(sg.len() - 1);
+                            continue;
+                        },
+                        KeyCode::Tab => {
+                            if let Some(cmd) = sg.selected_command() {
+                                input.set_text(complete_slash(&cmd));
+                                suggest_selected = 0;
+                            }
+                            continue;
+                        },
+                        KeyCode::Esc => {
+                            suggest_dismissed = true;
+                            continue;
+                        },
+                        _ => {},
+                    }
+                }
+
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 let editable = !app.is_turn_running();
                 match key.code {
@@ -403,6 +495,11 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                     KeyCode::Backspace if editable => input.backspace(),
                     KeyCode::Char(c) if editable && !ctrl => input.insert(c),
                     _ => {},
+                }
+
+                // Editing the command word resets the popup highlight to the top.
+                if matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete) {
+                    suggest_selected = 0;
                 }
             }
 
@@ -870,5 +967,33 @@ mod render_tests {
             .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), None))
             .unwrap();
         assert!(buffer_text(&terminal).contains("again to exit"), "hint must show when quit_armed");
+    }
+
+    #[test]
+    fn slash_prefix_detects_command_word() {
+        assert_eq!(slash_suggest_prefix("/mo"), Some("mo"));
+        assert_eq!(slash_suggest_prefix("/"), Some(""));
+        assert_eq!(slash_suggest_prefix("/mode wildcard"), None, "a space ends the command word");
+        assert_eq!(slash_suggest_prefix("hello"), None);
+        assert_eq!(slash_suggest_prefix("!SELECT 1"), None);
+    }
+
+    #[test]
+    fn complete_slash_appends_space_only_for_arg_commands() {
+        let mode = naque_tui::SLASH_COMMANDS.iter().find(|c| c.name == "mode").unwrap();
+        assert_eq!(complete_slash(mode), "/mode ");
+        let help = naque_tui::SLASH_COMMANDS.iter().find(|c| c.name == "help").unwrap();
+        assert_eq!(complete_slash(help), "/help");
+    }
+
+    #[test]
+    fn suggest_popup_draws_matches_above_input() {
+        let sg = naque_tui::SlashSuggest::new(naque_tui::matching("c"), 0); // clear, cost
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_suggest_popup(f, &Theme::new(false), &sg)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("/clear"), "popup should list /clear:\n{text}");
+        assert!(text.contains("/cost"), "popup should list /cost:\n{text}");
     }
 }
