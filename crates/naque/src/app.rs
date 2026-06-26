@@ -476,6 +476,23 @@ impl App {
         self.active_connection = connection;
     }
 
+    pub(crate) fn list_profiles(&self) -> Result<Vec<String>, AppError> {
+        match &self.store {
+            Some(s) => s.list_profiles().map_err(|e| AppError::Other(e.to_string())),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) fn list_environments(&self, profile: &str) -> Result<Vec<String>, AppError> {
+        let Some(store) = &self.store else {
+            return Ok(Vec::new());
+        };
+        match store.load_profile(profile).map_err(|e| AppError::Other(e.to_string()))? {
+            Some(p) => Ok(p.environments.keys().cloned().collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Switch the live session to `profile`/`env`: reconnect the database, load
     /// the profile's saved schema + context, apply its mode/row_cap, and clear
     /// the agent's memory. On any failure the current session is left intact.
@@ -1701,6 +1718,32 @@ pub mod tests {
         assert_eq!(app.active_env.as_deref(), Some("default"));
         app.handle_line("/save", &mut AutoApprove).await.unwrap();
         assert!(store.load_profile("shop").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn list_environments_returns_saved_envs() {
+        use naque_profile::{ConnectionSpec, Profile, Store};
+        let home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        let store = Store::open(home.path());
+        let mut envs = std::collections::BTreeMap::new();
+        envs.insert("prod".to_string(), ConnectionSpec::default());
+        envs.insert("dev".to_string(), ConnectionSpec::default());
+        store
+            .save_profile(
+                "shop",
+                &Profile {
+                    environments: envs,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        app.set_active_profile(store, Some("shop".into()), None, None);
+        let mut got = app.list_environments("shop").unwrap();
+        got.sort();
+        assert_eq!(got, vec!["dev".to_string(), "prod".to_string()]);
     }
 
     #[tokio::test]

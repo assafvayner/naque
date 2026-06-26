@@ -506,9 +506,21 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 match key.code {
                     KeyCode::Enter if editable => {
                         let line = input.take();
-                        if line.trim().is_empty() { continue; }
-                        dispatch_line(app, &line).await;
-                        if app.should_quit() { break; }
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        let trimmed = line.trim();
+                        let is_cmd = |c: &str| trimmed == c || trimmed.starts_with(&format!("{c} "));
+                        if is_cmd("/profile") {
+                            handle_profile_command(app, theme, terminal).await;
+                        } else if is_cmd("/env") {
+                            handle_env_command(app, theme, terminal).await;
+                        } else {
+                            dispatch_line(app, &line).await;
+                        }
+                        if app.should_quit() {
+                            break;
+                        }
                     },
                     KeyCode::PageUp => app.live.scroll_up(5),
                     KeyCode::PageDown => app.live.scroll_down(5),
@@ -722,8 +734,6 @@ where
     }
 }
 
-// Wired to /profile and /env in the next task.
-#[allow(dead_code)]
 fn run_picker<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     theme: &Theme,
@@ -767,6 +777,61 @@ fn run_picker<B: ratatui::backend::Backend>(
                 None => {},
             }
         }
+    }
+}
+
+async fn handle_profile_command<B: ratatui::backend::Backend>(
+    app: &mut App,
+    theme: &Theme,
+    terminal: &mut Terminal<B>,
+) {
+    let profiles = match app.list_profiles() {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => {
+            app.push_info("no profiles saved yet; use /save <profile> <env>");
+            return;
+        },
+        Err(e) => {
+            app.push_info(format!("cannot list profiles: {e}"));
+            return;
+        },
+    };
+    let Some(pi) = run_picker(terminal, theme, "profile", profiles.clone()) else {
+        return;
+    };
+    let profile = profiles[pi].clone();
+    let envs = match app.list_environments(&profile) {
+        Ok(e) if !e.is_empty() => e,
+        _ => {
+            app.push_info(format!("profile '{profile}' has no environments"));
+            return;
+        },
+    };
+    let Some(ei) = run_picker(terminal, theme, "environment", envs.clone()) else {
+        return;
+    };
+    if let Err(e) = app.switch_to(&profile, &envs[ei]).await {
+        app.push_info(format!("switch failed: {e}"));
+    }
+}
+
+async fn handle_env_command<B: ratatui::backend::Backend>(app: &mut App, theme: &Theme, terminal: &mut Terminal<B>) {
+    let Some(profile) = app.active_profile.clone() else {
+        app.push_info("no active profile; pick one with /profile");
+        return;
+    };
+    let envs = match app.list_environments(&profile) {
+        Ok(e) if !e.is_empty() => e,
+        _ => {
+            app.push_info(format!("profile '{profile}' has no environments"));
+            return;
+        },
+    };
+    let Some(ei) = run_picker(terminal, theme, "environment", envs.clone()) else {
+        return;
+    };
+    if let Err(e) = app.switch_to(&profile, &envs[ei]).await {
+        app.push_info(format!("switch failed: {e}"));
     }
 }
 
