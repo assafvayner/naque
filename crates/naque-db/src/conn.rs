@@ -240,7 +240,9 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
     if tn == "macaddr"
         && let Ok(v) = row.try_get::<sqlx::types::mac_address::MacAddress, _>(i)
     {
-        return Some(v.to_string());
+        // The mac_address crate's Display is uppercase; Postgres renders macaddr
+        // lowercase, so match Postgres.
+        return Some(v.to_string().to_ascii_lowercase());
     }
     if (tn == "bit" || tn == "varbit")
         && let Ok(v) = row.try_get::<sqlx::types::BitVec, _>(i)
@@ -319,7 +321,11 @@ fn decode_pg_array(row: &sqlx::postgres::PgRow, i: usize, elem: &str) -> Option<
         },
         "oid" => try_arr_with!(sqlx::postgres::types::Oid, |o: &sqlx::postgres::types::Oid| o.0.to_string()),
         "inet" | "cidr" => try_arr!(sqlx::types::ipnetwork::IpNetwork),
-        "macaddr" => try_arr!(sqlx::types::mac_address::MacAddress),
+        "macaddr" => {
+            try_arr_with!(sqlx::types::mac_address::MacAddress, |m: &sqlx::types::mac_address::MacAddress| {
+                m.to_string().to_ascii_lowercase()
+            })
+        },
         "bit" | "varbit" => try_arr_with!(sqlx::types::BitVec, format_bit_vec),
         _ => {},
     }
