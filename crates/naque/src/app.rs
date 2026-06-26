@@ -1053,6 +1053,7 @@ impl App {
                 },
                 Err(e) => {
                     self.transcript.push(TranscriptEntry::Error(format!("learn failed: {e}")));
+                    return Ok(());
                 },
             }
         }
@@ -1074,9 +1075,18 @@ impl App {
                 )));
             }
         }
-        if stripped_secret {
+        let mut stripped_param = false;
+        if let Some(params) = spec.params.as_mut() {
+            let before = params.len();
+            params.retain(|k, _| !k.to_ascii_lowercase().contains("password"));
+            stripped_param = params.len() != before;
+            if params.is_empty() {
+                spec.params = None;
+            }
+        }
+        if stripped_secret || stripped_param {
             self.transcript
-                .push(TranscriptEntry::Info("inline password not persisted; use password_env/password_keyring".into()));
+                .push(TranscriptEntry::Info("secret values not persisted; use password_env/password_keyring".into()));
         }
 
         let mut loaded = store
@@ -1691,6 +1701,45 @@ pub mod tests {
         assert_eq!(app.active_env.as_deref(), Some("default"));
         app.handle_line("/save", &mut AutoApprove).await.unwrap();
         assert!(store.load_profile("shop").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn save_strips_password_from_params() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+        let ov = LlmResponse {
+            text: Some("ov".into()),
+            tool_calls: vec![],
+            usage: LlmUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![ov]).await;
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("password".to_string(), "PARAM_SECRET".to_string());
+        params.insert("sslmode".to_string(), "require".to_string());
+        app.set_active_profile(
+            Store::open(home.path()),
+            None,
+            None,
+            Some(naque_profile::ConnectionSpec {
+                engine: Some(naque_profile::ProfileEngine::Sqlite),
+                path: Some(dbf.path().display().to_string()),
+                params: Some(params),
+                ..Default::default()
+            }),
+        );
+        app.handle_line("/save shop dev", &mut AutoApprove).await.unwrap();
+        let store = Store::open(home.path());
+        let toml_text = std::fs::read_to_string(store.profile_dir("shop").join("profile.toml")).unwrap();
+        assert!(!toml_text.contains("PARAM_SECRET"), "password param must be stripped: {toml_text}");
+        assert!(toml_text.contains("sslmode"), "non-secret params preserved");
     }
 }
 
