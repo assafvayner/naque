@@ -170,6 +170,21 @@ impl Agent {
         }
     }
 
+    /// Single-shot completion: one provider call with no tools and a fresh
+    /// (non-persisted) message. Used for short generated text such as a schema
+    /// overview. Does not touch the running conversation memory.
+    pub async fn complete_once(&self, system: &str, user: &str) -> Result<String, LlmError> {
+        let req = LlmRequest {
+            model: self.config.model.clone(),
+            system: system.to_string(),
+            messages: vec![Message::User(user.to_string())],
+            tools: Vec::new(),
+            max_tokens: self.config.max_tokens,
+        };
+        let resp = self.provider.complete(&req).await?;
+        Ok(resp.text.unwrap_or_default())
+    }
+
     /// Maximum provider round-trips per turn (from the agent config).
     pub fn max_iterations(&self) -> u32 {
         self.config.max_iterations

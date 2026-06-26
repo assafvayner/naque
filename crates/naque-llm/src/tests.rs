@@ -217,6 +217,22 @@ async fn test_provider_sees_prior_messages_on_second_turn() {
 }
 
 // ---------------------------------------------------------------------------
+// Test: complete_once — single-shot text, no tools
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn complete_once_returns_text_without_tools() {
+    let provider = MockProvider::new(vec![LlmResponse {
+        text: Some("a short overview".into()),
+        tool_calls: vec![],
+        usage: Usage::default(),
+        stop_reason: "end_turn".into(),
+    }]);
+    let agent = Agent::new(Box::new(provider), config(5));
+    let out = agent.complete_once("system", "describe this schema").await.unwrap();
+    assert_eq!(out, "a short overview");
+}
+
+// ---------------------------------------------------------------------------
 // Test 6: standard_tools returns the 4 expected tools
 // ---------------------------------------------------------------------------
 #[test]
