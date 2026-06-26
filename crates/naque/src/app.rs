@@ -362,6 +362,13 @@ pub struct App {
     pub(crate) inflight: Option<crate::turn::RunningTurn>,
     pub(crate) event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<naque_llm::AgentEvent>>,
     pub(crate) approval_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::approval::ApprovalRequest>>,
+    pub(crate) store: Option<naque_profile::Store>,
+    pub(crate) active_profile: Option<String>,
+    pub(crate) active_env: Option<String>,
+    /// Connection spec to persist on `/save` (by-reference; no plaintext secret).
+    pub(crate) active_connection: Option<naque_profile::ConnectionSpec>,
+    /// Loaded `context.md` for the active profile, fed to the agent.
+    pub(crate) active_context: Option<String>,
 }
 
 impl App {
@@ -393,6 +400,11 @@ impl App {
             inflight: None,
             event_rx: None,
             approval_rx: None,
+            store: None,
+            active_profile: None,
+            active_env: None,
+            active_connection: None,
+            active_context: None,
         }
     }
 
@@ -442,6 +454,26 @@ impl App {
     /// Push an informational transcript entry.
     pub fn push_info(&mut self, msg: impl Into<String>) {
         self.transcript.push(TranscriptEntry::Info(msg.into()));
+    }
+
+    /// Install the profile store and the active profile/env identity (called by
+    /// `setup` at launch and by `switch_to`).
+    // Consumed by setup (launch) and switch_to in later tasks of this feature.
+    #[allow(dead_code)]
+    pub(crate) fn set_active_profile(
+        &mut self,
+        store: naque_profile::Store,
+        profile: Option<String>,
+        env: Option<String>,
+        connection: Option<naque_profile::ConnectionSpec>,
+    ) {
+        self.store = Some(store);
+        if let Some(p) = &profile {
+            self.profile_name = p.clone();
+        }
+        self.active_profile = profile;
+        self.active_env = env;
+        self.active_connection = connection;
     }
 
     // --- SQL execution -----------------------------------------------------
@@ -498,12 +530,18 @@ impl App {
     /// Per-turn context appended to the agent's system prompt: the active
     /// permission mode (so behavior tracks `/mode`) then the schema catalog.
     fn turn_context(&self) -> String {
-        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
         let guidance = mode_guidance(self.mode, self.catastrophic_guard);
-        if catalog.is_empty() {
+        // Prefer the saved context doc (schema outline + overview + notes); fall
+        // back to the compact catalog for ad-hoc sessions without a profile.
+        let body = if let Some(ctx) = &self.active_context {
+            ctx.clone()
+        } else {
+            self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default()
+        };
+        if body.is_empty() {
             guidance
         } else {
-            format!("{guidance}\n\n{catalog}")
+            format!("{guidance}\n\n{body}")
         }
     }
 
@@ -1216,6 +1254,17 @@ pub mod tests {
             "after /mode wildcard the agent context must say WILDCARD, got: {}",
             app.turn_context()
         );
+    }
+
+    #[tokio::test]
+    async fn turn_context_uses_active_context_when_present() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        app.active_context = Some("## Schema\n\n### orders\n- id bigint".to_string());
+        let ctx = app.turn_context();
+        assert!(ctx.contains("WILDCARD"), "mode line still present");
+        assert!(ctx.contains("### orders"), "active context fed");
     }
 
     // ------------------------------------------------------------------
