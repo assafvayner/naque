@@ -44,6 +44,11 @@ pub struct ConnectionSpec {
     /// connection time via the system keyring.
     pub password_keyring: Option<String>,
 
+    /// Plaintext password, used at the user's own risk. Lowest-priority password
+    /// source (keyring and env var win). Never written by `/save`; only honored
+    /// if the user puts it here themselves.
+    pub password: Option<String>,
+
     /// File-system path to a SQLite database file.
     pub path: Option<String>,
 
@@ -100,6 +105,18 @@ mod tests {
         let serialized = toml::to_string(&spec).unwrap();
         let back: ConnectionSpec = toml::from_str(&serialized).unwrap();
         assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn connection_spec_accepts_inline_password() {
+        let toml_str = r#"
+engine = "postgres"
+host = "h"
+user = "u"
+password = "secret"
+"#;
+        let spec: ConnectionSpec = toml::from_str(toml_str).unwrap();
+        assert_eq!(spec.password.as_deref(), Some("secret"));
     }
 
     #[test]

@@ -220,20 +220,22 @@ impl ConnectionSpec {
             .as_deref()
             .ok_or_else(|| ConfigError::Other("postgres profile missing 'dbname'".into()))?;
 
-        // Resolve password from env or keyring (optional — some setups use
-        // peer auth or no password).
-        let password = if let Some(env_var) = &self.password_env {
-            let val = secrets.env(env_var).ok_or_else(|| {
-                ConfigError::Other(format!("postgres profile: password_env '{}' is not set", env_var))
-            })?;
-            Some(val)
-        } else if let Some(account) = &self.password_keyring {
+        // Resolve password: keyring → env → inline plaintext (lowest priority).
+        // A configured-but-missing keyring or env source is an error; inline
+        // is a silent fallback used only when neither keyring nor env is
+        // configured.
+        let password = if let Some(account) = &self.password_keyring {
             let val = secrets.keyring(account).ok_or_else(|| {
                 ConfigError::Other(format!("postgres profile: keyring account '{}' not found", account))
             })?;
             Some(val)
+        } else if let Some(env_var) = &self.password_env {
+            let val = secrets.env(env_var).ok_or_else(|| {
+                ConfigError::Other(format!("postgres profile: password_env '{}' is not set", env_var))
+            })?;
+            Some(val)
         } else {
-            None
+            self.password.clone()
         };
 
         let port = self.port.unwrap_or(5432);
