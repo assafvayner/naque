@@ -5,7 +5,6 @@
 //! draft when navigation moves past the newest entry. Consecutive duplicates
 //! are suppressed (bash `ignoredups`). Nothing is persisted to disk.
 
-/// In-memory, session-scoped command history with readline-style navigation.
 #[derive(Debug, Default)]
 pub struct History {
     entries: Vec<String>,
@@ -36,7 +35,7 @@ impl History {
     /// Up: move to an older entry. On the first call (not yet navigating),
     /// `current` is saved as the draft. Returns the text to place in the
     /// input, or None if there is no history (input should stay unchanged).
-    pub fn prev(&mut self, current: &str) -> Option<String> {
+    pub fn older(&mut self, current: &str) -> Option<String> {
         if self.entries.is_empty() {
             return None;
         }
@@ -54,9 +53,7 @@ impl History {
     /// Down: move to a newer entry. Returns the entry text, or the restored
     /// draft (possibly empty) when moving past the newest entry, or None if
     /// not currently navigating (input should stay unchanged).
-    // Pairs with `prev` as the readline Up/Down idiom; not an iterator.
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<String> {
+    pub fn newer(&mut self) -> Option<String> {
         match self.pos {
             None => None,
             Some(i) if i + 1 < self.entries.len() => {
@@ -76,80 +73,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_history_prev_is_none() {
+    fn empty_history_older_is_none() {
         let mut h = History::new();
-        assert_eq!(h.prev("draft"), None);
+        assert_eq!(h.older("draft"), None);
     }
 
     #[test]
-    fn next_without_navigating_is_none() {
+    fn newer_without_navigating_is_none() {
         let mut h = History::new();
         h.push("a");
-        assert_eq!(h.next(), None);
+        assert_eq!(h.newer(), None);
     }
 
     #[test]
-    fn push_then_prev_returns_last() {
+    fn push_then_older_returns_last() {
         let mut h = History::new();
         h.push("select 1");
-        assert_eq!(h.prev(""), Some("select 1".to_string()));
+        assert_eq!(h.older(""), Some("select 1".to_string()));
     }
 
     #[test]
-    fn prev_walks_backward_and_clamps_at_oldest() {
+    fn older_walks_backward_and_clamps_at_oldest() {
         let mut h = History::new();
         h.push("first");
         h.push("second");
         h.push("third");
-        assert_eq!(h.prev(""), Some("third".to_string()));
-        assert_eq!(h.prev(""), Some("second".to_string()));
-        assert_eq!(h.prev(""), Some("first".to_string()));
+        assert_eq!(h.older(""), Some("third".to_string()));
+        assert_eq!(h.older(""), Some("second".to_string()));
+        assert_eq!(h.older(""), Some("first".to_string()));
         // Clamped at the oldest entry.
-        assert_eq!(h.prev(""), Some("first".to_string()));
+        assert_eq!(h.older(""), Some("first".to_string()));
     }
 
     #[test]
-    fn next_walks_forward() {
+    fn newer_walks_forward() {
         let mut h = History::new();
         h.push("first");
         h.push("second");
         h.push("third");
-        h.prev(""); // third
-        h.prev(""); // second
-        h.prev(""); // first
-        assert_eq!(h.next(), Some("second".to_string()));
-        assert_eq!(h.next(), Some("third".to_string()));
+        h.older(""); // third
+        h.older(""); // second
+        h.older(""); // first
+        assert_eq!(h.newer(), Some("second".to_string()));
+        assert_eq!(h.newer(), Some("third".to_string()));
     }
 
     #[test]
-    fn next_past_newest_restores_draft() {
+    fn newer_past_newest_restores_draft() {
         let mut h = History::new();
         h.push("entry");
-        assert_eq!(h.prev("in-progress"), Some("entry".to_string()));
+        assert_eq!(h.older("in-progress"), Some("entry".to_string()));
         // Moving forward past the newest entry restores the saved draft.
-        assert_eq!(h.next(), Some("in-progress".to_string()));
+        assert_eq!(h.newer(), Some("in-progress".to_string()));
         // No longer navigating.
-        assert_eq!(h.next(), None);
+        assert_eq!(h.newer(), None);
     }
 
     #[test]
-    fn next_past_newest_restores_empty_draft() {
+    fn newer_past_newest_restores_empty_draft() {
         let mut h = History::new();
         h.push("entry");
-        assert_eq!(h.prev(""), Some("entry".to_string()));
-        assert_eq!(h.next(), Some(String::new()));
+        assert_eq!(h.older(""), Some("entry".to_string()));
+        assert_eq!(h.newer(), Some(String::new()));
     }
 
     #[test]
-    fn draft_captured_from_current_on_first_prev() {
+    fn draft_captured_from_current_on_first_older() {
         let mut h = History::new();
         h.push("a");
         h.push("b");
-        assert_eq!(h.prev("typing this"), Some("b".to_string()));
-        h.prev(""); // a
+        assert_eq!(h.older("typing this"), Some("b".to_string()));
+        h.older(""); // a
         // Down all the way back restores the originally-captured draft.
-        h.next(); // b
-        assert_eq!(h.next(), Some("typing this".to_string()));
+        h.newer(); // b
+        assert_eq!(h.newer(), Some("typing this".to_string()));
     }
 
     #[test]
@@ -157,9 +154,9 @@ mod tests {
         let mut h = History::new();
         h.push("same");
         h.push("same");
-        assert_eq!(h.prev(""), Some("same".to_string()));
-        // Only one entry recorded, so prev clamps here.
-        assert_eq!(h.prev(""), Some("same".to_string()));
+        assert_eq!(h.older(""), Some("same".to_string()));
+        // Only one entry recorded, so navigation clamps here.
+        assert_eq!(h.older(""), Some("same".to_string()));
     }
 
     #[test]
@@ -168,9 +165,9 @@ mod tests {
         h.push("a");
         h.push("b");
         h.push("a");
-        assert_eq!(h.prev(""), Some("a".to_string()));
-        assert_eq!(h.prev(""), Some("b".to_string()));
-        assert_eq!(h.prev(""), Some("a".to_string()));
+        assert_eq!(h.older(""), Some("a".to_string()));
+        assert_eq!(h.older(""), Some("b".to_string()));
+        assert_eq!(h.older(""), Some("a".to_string()));
     }
 
     #[test]
@@ -179,14 +176,14 @@ mod tests {
         h.push("");
         h.push("   ");
         h.push("\t\n");
-        assert_eq!(h.prev(""), None);
+        assert_eq!(h.older(""), None);
     }
 
     #[test]
     fn push_trims_the_line() {
         let mut h = History::new();
         h.push("  trimmed  ");
-        assert_eq!(h.prev(""), Some("trimmed".to_string()));
+        assert_eq!(h.older(""), Some("trimmed".to_string()));
     }
 
     #[test]
@@ -194,10 +191,10 @@ mod tests {
         let mut h = History::new();
         h.push("first");
         h.push("second");
-        h.prev(""); // second
-        h.prev(""); // first, now navigating mid-history
+        h.older(""); // second
+        h.older(""); // first, now navigating mid-history
         h.push("third");
         // After push, navigation starts fresh from the newest entry.
-        assert_eq!(h.prev(""), Some("third".to_string()));
+        assert_eq!(h.older(""), Some("third".to_string()));
     }
 }

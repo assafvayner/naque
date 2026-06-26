@@ -535,12 +535,12 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                     KeyCode::End if editable => input.move_end(),
                     // Up/Down recall session history (popup intercepts these when open).
                     KeyCode::Up if editable => {
-                        if let Some(text) = history.prev(input.text()) {
+                        if let Some(text) = history.older(input.text()) {
                             input.set_text(text);
                         }
                     },
                     KeyCode::Down if editable => {
-                        if let Some(text) = history.next() {
+                        if let Some(text) = history.newer() {
                             input.set_text(text);
                         }
                     },
