@@ -227,14 +227,41 @@ fn centered_modal_rect(area: Rect, prompt: &ApprovalPrompt) -> Rect {
 /// `Sql` entries get their `[label]` badge colored by classification via
 /// [`Theme::label_style`], so read/write/DDL/catastrophic statements are
 /// visually distinguishable (and degrade correctly under NO_COLOR).
+/// Split `text` on newlines into lines, prefixing the first with `gutter` and
+/// continuation lines with a matching-width indent so the body stays aligned.
+fn prefixed_lines(gutter: &'static str, text: &str) -> Vec<Line<'static>> {
+    let indent = " ".repeat(gutter.chars().count());
+    text.split('\n')
+        .enumerate()
+        .map(|(i, raw)| {
+            let g = if i == 0 { gutter } else { indent.as_str() };
+            Line::from(Span::raw(format!("{g}{raw}")))
+        })
+        .collect()
+}
+
+/// Render an agent answer as Markdown, prefixed with the ` ai: ` gutter on the
+/// first line and aligned indentation on the rest.
+fn agent_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
+    let body = naque_tui::render_markdown(text, theme);
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(body.len().max(1));
+    for (i, line) in body.into_iter().enumerate() {
+        let gutter = if i == 0 { " ai: " } else { "     " };
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        spans.push(Span::raw(gutter));
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    if out.is_empty() {
+        out.push(Line::from(Span::raw(" ai: ")));
+    }
+    out
+}
+
 fn transcript_lines<'a>(entry: &'a TranscriptEntry, theme: &Theme) -> Vec<Line<'a>> {
     match entry {
-        TranscriptEntry::User(text) => {
-            vec![Line::from(Span::raw(format!("you: {text}")))]
-        },
-        TranscriptEntry::Agent(text) => {
-            vec![Line::from(Span::raw(format!(" ai: {text}")))]
-        },
+        TranscriptEntry::User(text) => prefixed_lines("you: ", text),
+        TranscriptEntry::Agent(text) => agent_lines(text, theme),
         TranscriptEntry::Sql { sql, label } => {
             vec![Line::from(vec![
                 Span::raw("sql["),
@@ -242,15 +269,9 @@ fn transcript_lines<'a>(entry: &'a TranscriptEntry, theme: &Theme) -> Vec<Line<'
                 Span::raw(format!("]: {sql}")),
             ])]
         },
-        TranscriptEntry::Info(text) => {
-            vec![Line::from(Span::raw(format!("inf: {text}")))]
-        },
-        TranscriptEntry::Error(text) => {
-            vec![Line::from(Span::raw(format!("err: {text}")))]
-        },
-        TranscriptEntry::Rejected(sql) => {
-            vec![Line::from(Span::raw(format!("rej: {sql}")))]
-        },
+        TranscriptEntry::Info(text) => prefixed_lines("inf: ", text),
+        TranscriptEntry::Error(text) => prefixed_lines("err: ", text),
+        TranscriptEntry::Rejected(sql) => prefixed_lines("rej: ", sql),
         TranscriptEntry::Reasoning(text) => {
             vec![Line::from(Span::styled(format!("  · {text}"), theme.dim_style()))]
         },
@@ -984,6 +1005,16 @@ mod render_tests {
         assert_eq!(complete_slash(mode), "/mode ");
         let help = naque_tui::SLASH_COMMANDS.iter().find(|c| c.name == "help").unwrap();
         assert_eq!(complete_slash(help), "/help");
+    }
+
+    #[test]
+    fn agent_answer_splits_into_aligned_lines() {
+        let entry = TranscriptEntry::Agent("line one\nline two".into());
+        let lines = transcript_lines(&entry, &Theme::new(false));
+        assert_eq!(lines.len(), 2, "a two-line answer must render as two lines");
+        let text = |l: &Line| -> String { l.spans.iter().map(|s| s.content.as_ref()).collect() };
+        assert_eq!(text(&lines[0]), " ai: line one");
+        assert_eq!(text(&lines[1]), "     line two", "continuation aligns under the body");
     }
 
     #[test]
