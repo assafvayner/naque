@@ -165,8 +165,10 @@ mod tests {
 
     #[test]
     fn windows_to_keep_selection_visible() {
-        // 8 commands, but a popup only 3 rows tall (1 inner row + borders is 3).
-        let sg = SlashSuggest::new(matching(""), 7); // last command highlighted
+        // Many commands, but a popup only 3 rows tall (1 inner row + borders is 3).
+        use crate::commands::SLASH_COMMANDS;
+        let last = SLASH_COMMANDS.len() - 1;
+        let sg = SlashSuggest::new(matching(""), last); // last command highlighted
         let rows = render_to_string(&sg, 60, 3);
         let joined = rows.join("\n");
         // The last command ("exit") must be visible since it's selected.

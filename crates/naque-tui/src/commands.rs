@@ -59,6 +59,26 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "export the last result",
     },
     SlashCommand {
+        name: "profile",
+        args: "",
+        help: "switch profile + environment (picker)",
+    },
+    SlashCommand {
+        name: "env",
+        args: "",
+        help: "switch environment within the current profile",
+    },
+    SlashCommand {
+        name: "save",
+        args: "[profile] [env]",
+        help: "save current connection, schema & context",
+    },
+    SlashCommand {
+        name: "context",
+        args: "[note]",
+        help: "show the context doc, or append a note",
+    },
+    SlashCommand {
         name: "quit",
         args: "",
         help: "exit naque",
@@ -116,7 +136,15 @@ mod tests {
     #[test]
     fn matching_filters_by_prefix() {
         let names: Vec<&str> = matching("c").iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["clear", "cost"]);
+        assert_eq!(names, vec!["clear", "cost", "context"]);
+    }
+
+    #[test]
+    fn registry_includes_profile_commands() {
+        let names: Vec<&str> = SLASH_COMMANDS.iter().map(|c| c.name).collect();
+        for expected in ["profile", "env", "save", "context"] {
+            assert!(names.contains(&expected), "registry missing /{expected}");
+        }
     }
 
     #[test]
