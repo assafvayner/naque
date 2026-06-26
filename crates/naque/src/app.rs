@@ -987,6 +987,12 @@ impl App {
             return Ok(());
         }
 
+        if cmd == "save" || cmd.starts_with("save ") {
+            return self
+                .save_profile_command(cmd.strip_prefix("save").map(str::trim).unwrap_or(""))
+                .await;
+        }
+
         // Silence the unused parameter warning in the non-NL paths.
         let _ = approver;
 
@@ -1015,6 +1021,114 @@ impl App {
             Input::Empty => {},
         }
         Ok(())
+    }
+
+    async fn save_profile_command(&mut self, args: &str) -> Result<(), AppError> {
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| AppError::Other("profile store unavailable".into()))?;
+
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        let (profile, env) = match parts.as_slice() {
+            [] => match (&self.active_profile, &self.active_env) {
+                (Some(p), Some(e)) => (p.clone(), e.clone()),
+                _ => {
+                    self.transcript.push(TranscriptEntry::Info(
+                        "usage: /save <profile> [env] (no active profile to update)".into(),
+                    ));
+                    return Ok(());
+                },
+            },
+            [p] => (p.to_string(), "default".to_string()),
+            [p, e, ..] => (p.to_string(), e.to_string()),
+        };
+
+        if self.schema.is_none() {
+            match naque_schema::introspect(&mut *self.db.lock().await).await {
+                Ok(model) => {
+                    let count = model.tables.len();
+                    self.schema = Some(model);
+                    self.transcript.push(TranscriptEntry::Info(format!("learned {count} table(s)")));
+                },
+                Err(e) => {
+                    self.transcript.push(TranscriptEntry::Error(format!("learn failed: {e}")));
+                },
+            }
+        }
+        let Some(model) = self.schema.clone() else {
+            self.transcript
+                .push(TranscriptEntry::Error("no schema to save; connect and /learn first".into()));
+            return Ok(());
+        };
+
+        let mut spec = self.active_connection.clone().unwrap_or_default();
+        let stripped_secret = spec.password.take().is_some();
+        if let Some(u) = &spec.url {
+            let (red, had) = naque_profile::strip_url_password(u);
+            spec.url = Some(red);
+            if had {
+                self.transcript.push(TranscriptEntry::Info(format!(
+                    "connection saved without its password — add password_env/password_keyring to [environments.{env}] in {}",
+                    store.profile_dir(&profile).join("profile.toml").display()
+                )));
+            }
+        }
+        if stripped_secret {
+            self.transcript
+                .push(TranscriptEntry::Info("inline password not persisted; use password_env/password_keyring".into()));
+        }
+
+        let mut loaded = store
+            .load_profile(&profile)
+            .map_err(|e| AppError::Other(e.to_string()))?
+            .unwrap_or_default();
+        loaded.environments.insert(env.clone(), spec.clone());
+        if loaded.default_environment.is_none() {
+            loaded.default_environment = Some(env.clone());
+        }
+        store
+            .save_profile(&profile, &loaded)
+            .map_err(|e| AppError::Other(e.to_string()))?;
+
+        naque_schema::save_schema(&store.profile_dir(&profile), &model).map_err(|e| AppError::Other(e.to_string()))?;
+
+        let schema_md = naque_schema::schema_markdown(&model);
+        let prior = std::fs::read_to_string(store.context_path(&profile)).unwrap_or_default();
+        let notes = naque_schema::extract_notes(&prior);
+        let overview = self.generate_overview(&schema_md).await;
+        let doc = naque_schema::assemble_context(&profile, &schema_md, &overview, &notes);
+        std::fs::write(store.context_path(&profile), &doc).map_err(|e| AppError::Other(e.to_string()))?;
+
+        self.active_profile = Some(profile.clone());
+        self.active_env = Some(env.clone());
+        self.active_connection = Some(spec);
+        self.active_context = Some(doc);
+        self.profile_name = profile.clone();
+        self.transcript
+            .push(TranscriptEntry::Info(format!("saved profile {profile}/{env}")));
+        Ok(())
+    }
+
+    /// Ask the model for a short overview of the schema. Failure is non-fatal:
+    /// returns a placeholder so the save still succeeds.
+    async fn generate_overview(&mut self, schema_md: &str) -> String {
+        let system = "You are a database expert. In 4-8 sentences, explain what this schema represents: \
+                      the key entities, important relationships, naming conventions, and any gotchas. \
+                      Do not restate every column.";
+        let result = match self.agent_slot.as_ref() {
+            Some(agent) => agent.complete_once(system, schema_md).await,
+            None => return "(overview unavailable: no agent)".to_string(),
+        };
+        match result {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => "(overview unavailable: empty response)".to_string(),
+            Err(e) => {
+                self.transcript
+                    .push(TranscriptEntry::Info(format!("overview generation failed: {e}")));
+                "(overview unavailable)".to_string()
+            },
+        }
     }
 }
 
@@ -1471,6 +1585,112 @@ pub mod tests {
         // The edited query returns only the row with id=1.
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Some("1".to_string()));
+    }
+
+    // ------------------------------------------------------------------
+    // Task 4.2: /save command
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn save_writes_profile_schema_and_context_by_reference() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+
+        let overview = LlmResponse {
+            text: Some("Two tables: orders and users.".into()),
+            tool_calls: vec![],
+            usage: LlmUsage {
+                input_tokens: 5,
+                output_tokens: 5,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![overview]).await;
+        app.handle_line("!CREATE TABLE orders(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        app.set_active_profile(
+            Store::open(home.path()),
+            None,
+            None,
+            Some(naque_profile::ConnectionSpec {
+                engine: Some(naque_profile::ProfileEngine::Sqlite),
+                path: Some(dbf.path().display().to_string()),
+                password_env: Some("UNUSED".into()),
+                ..Default::default()
+            }),
+        );
+
+        app.handle_line("/save shop dev", &mut AutoApprove).await.unwrap();
+
+        let store = Store::open(home.path());
+        let saved = store.load_profile("shop").unwrap().unwrap();
+        assert!(saved.environments.contains_key("dev"));
+        let toml_text = std::fs::read_to_string(store.profile_dir("shop").join("profile.toml")).unwrap();
+        assert!(!toml_text.contains("password ="), "no plaintext password persisted: {toml_text}");
+        assert!(store.profile_dir("shop").join("schema.json").is_file());
+        let ctx = std::fs::read_to_string(store.context_path("shop")).unwrap();
+        assert!(ctx.contains("## Overview"));
+        assert!(ctx.contains("Two tables"));
+        assert!(ctx.contains("orders"));
+    }
+
+    #[tokio::test]
+    async fn save_defaults_env_to_default_and_no_args_uses_active() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+        let ov = LlmResponse {
+            text: Some("ov".into()),
+            tool_calls: vec![],
+            usage: LlmUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let ov2 = LlmResponse {
+            text: Some("ov2".into()),
+            tool_calls: vec![],
+            usage: LlmUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![ov, ov2]).await;
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        app.set_active_profile(
+            Store::open(home.path()),
+            None,
+            None,
+            Some(naque_profile::ConnectionSpec {
+                engine: Some(naque_profile::ProfileEngine::Sqlite),
+                path: Some(dbf.path().display().to_string()),
+                ..Default::default()
+            }),
+        );
+
+        app.handle_line("/save shop", &mut AutoApprove).await.unwrap();
+        let store = Store::open(home.path());
+        assert!(
+            store
+                .load_profile("shop")
+                .unwrap()
+                .unwrap()
+                .environments
+                .contains_key("default")
+        );
+
+        assert_eq!(app.active_profile.as_deref(), Some("shop"));
+        assert_eq!(app.active_env.as_deref(), Some("default"));
+        app.handle_line("/save", &mut AutoApprove).await.unwrap();
+        assert!(store.load_profile("shop").unwrap().is_some());
     }
 }
 
