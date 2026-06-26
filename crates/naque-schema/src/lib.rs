@@ -2,11 +2,13 @@ mod cache;
 mod error;
 mod introspect;
 mod model;
+mod render;
 
 pub use cache::{cached_fingerprint, load_schema, save_schema};
 pub use error::SchemaError;
 pub use introspect::{current_fingerprint, introspect};
 pub use model::{ColumnInfo, DocEntry, ForeignKey, IndexInfo, SchemaModel, TableInfo};
+pub use render::schema_markdown;
 
 #[cfg(test)]
 mod tests {
