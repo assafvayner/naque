@@ -132,12 +132,23 @@ pub fn apply_event_to_transcript(
                 *slot = Some(summary.clone());
             }
         },
-        E::TurnFinished { .. } => {
+        E::TurnFinished {
+            iterations,
+            hit_iteration_cap,
+        } => {
             if let Some(i) = cur.take()
                 && let Some(TranscriptEntry::Reasoning(s)) = transcript.get(i)
             {
                 let answer = s.clone();
                 transcript[i] = TranscriptEntry::Agent(answer);
+            }
+            // On an iteration-cap finish the loop's last events were tool calls,
+            // so `cur` is already None and nothing was relabeled into an answer.
+            // Surface an explicit notice so the turn doesn't appear to stop silently.
+            if *hit_iteration_cap {
+                transcript.push(TranscriptEntry::Info(format!(
+                    "(stopped after {iterations} rounds: reached max iterations)"
+                )));
             }
         },
         E::Cancelled => {
@@ -227,6 +238,44 @@ mod apply_tests {
         );
         assert_eq!(names(&t), vec!["agent"]);
         assert!(matches!(&t[0], TranscriptEntry::Agent(s) if s == "final"));
+    }
+
+    #[test]
+    fn finish_with_iteration_cap_pushes_notice() {
+        // A capped turn ends right after tool calls, so `cur` is None and there
+        // is no trailing reasoning to relabel — the answer would otherwise be
+        // dropped. The finish must leave an explicit notice instead.
+        let mut t: Vec<TranscriptEntry> = vec![];
+        let mut cur: Option<usize> = None;
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::ToolCallStarted {
+                name: "run_query".into(),
+                sql: Some("SELECT 1".into()),
+            },
+        );
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::ToolCallFinished {
+                name: "run_query".into(),
+                summary: "1 rows".into(),
+                is_error: false,
+            },
+        );
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::TurnFinished {
+                iterations: 12,
+                hit_iteration_cap: true,
+            },
+        );
+        assert!(
+            matches!(t.last(), Some(TranscriptEntry::Info(s)) if s.contains("max iterations")),
+            "capped finish must push an explicit notice, got {t:?}"
+        );
     }
 
     #[test]
