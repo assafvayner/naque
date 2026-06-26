@@ -517,6 +517,9 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                             handle_profile_command(app, theme, terminal).await;
                         } else if is_cmd("/env") {
                             handle_env_command(app, theme, terminal).await;
+                        } else if is_cmd("/save") {
+                            let args = trimmed.strip_prefix("/save").map(str::trim).unwrap_or("");
+                            handle_save_command(app, theme, terminal, args).await;
                         } else {
                             dispatch_line(app, &line).await;
                         }
@@ -848,6 +851,91 @@ async fn handle_env_command<B: ratatui::backend::Backend>(app: &mut App, theme: 
     }
 }
 
+/// Drive `fut` to completion while animating a labelled spinner on the bottom
+/// row. The completion arm is `biased` ahead of the ticker so a ready future
+/// returns immediately and is never starved by the timer.
+async fn run_with_spinner<B, T, Fut>(terminal: &mut Terminal<B>, app: &App, theme: &Theme, label: &str, fut: Fut) -> T
+where
+    B: ratatui::backend::Backend,
+    Fut: std::future::Future<Output = T>,
+{
+    tokio::pin!(fut);
+    let mut ticker = tokio::time::interval(Duration::from_millis(80));
+    let empty = InputLine::new();
+    let mut frame_idx = 0usize;
+    loop {
+        tokio::select! {
+            biased;
+            out = &mut fut => return out,
+            _ = ticker.tick() => {
+                let spinner = naque_tui::SPINNER_FRAMES[frame_idx % naque_tui::SPINNER_FRAMES.len()];
+                frame_idx = frame_idx.wrapping_add(1);
+                let _ = terminal.draw(|f| {
+                    render(f, app, theme, &empty, None);
+                    render_busy(f, theme, spinner, label);
+                });
+            }
+        }
+    }
+}
+
+/// Overlay `⟨spinner⟩ ⟨label⟩` on the bottom (input) row while a slow phase runs.
+fn render_busy(frame: &mut Frame, theme: &Theme, spinner: &str, label: &str) {
+    let area = frame.area();
+    if area.height == 0 {
+        return;
+    }
+    let row = Rect {
+        x: 0,
+        y: area.height - 1,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(Clear, row);
+    let line = Line::from(Span::styled(format!("{spinner} {label}"), theme.activity_style()));
+    frame.render_widget(Paragraph::new(line), row);
+}
+
+/// Interactive `/save`: animate a phase-labelled spinner across the two slow
+/// phases (schema learning, overview generation) instead of freezing the UI.
+async fn handle_save_command<B: ratatui::backend::Backend>(
+    app: &mut App,
+    theme: &Theme,
+    terminal: &mut Terminal<B>,
+    args: &str,
+) {
+    let Some((profile, env)) = app.resolve_save_target(args) else {
+        return;
+    };
+    if app.schema().is_none() {
+        let fut = app.introspect_future();
+        match run_with_spinner(terminal, app, theme, "Learning schema…", fut).await {
+            Ok(model) => {
+                let n = model.tables.len();
+                app.set_schema(model);
+                app.push_info(format!("learned {n} table(s)"));
+            },
+            Err(e) => {
+                app.push_info(format!("learn failed: {e}"));
+                return;
+            },
+        }
+    }
+    let Some(schema_md) = app.schema_markdown_current() else {
+        app.push_info("no schema to save; connect and /learn first");
+        return;
+    };
+    let fut = app.overview_future(schema_md);
+    let (agent, outcome) = run_with_spinner(terminal, app, theme, "Generating overview…", fut).await;
+    app.restore_agent(agent);
+    if let Some(err) = outcome.error {
+        app.push_info(format!("overview generation failed: {err}"));
+    }
+    if let Err(e) = app.finish_save(&profile, &env, &outcome.text) {
+        app.push_info(format!("save failed: {e}"));
+    }
+}
+
 /// Render the edit-mode frame for the live-`App` approver.
 fn render_edit(frame: &mut Frame, app: &App, theme: &Theme, edit_buf: &str) {
     let size = frame.area();
@@ -1030,6 +1118,19 @@ mod tests {
         assert!(text.contains("hello"), "expected 'hello' in buffer:\n{text}");
         assert!(text.contains("my query"), "expected input:\n{text}");
         drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn run_with_spinner_returns_future_output() {
+        let app = make_test_app().await;
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // With `biased;` the completion arm wins immediately, so an already-ready
+        // future returns its value without waiting on the timer.
+        let out = run_with_spinner(&mut terminal, &app, &theme, "Working…", async { 42usize }).await;
+        assert_eq!(out, 42);
     }
 }
 

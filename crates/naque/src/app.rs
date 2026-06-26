@@ -1046,33 +1046,19 @@ impl App {
         Ok(())
     }
 
+    /// Headless `/save` orchestrator. Composes the granular pieces below so the
+    /// interactive (spinner) path in `ui.rs` can drive the same slow phases as
+    /// owned futures while redrawing frames.
     async fn save_profile_command(&mut self, args: &str) -> Result<(), AppError> {
-        let store = self
-            .store
-            .clone()
-            .ok_or_else(|| AppError::Other("profile store unavailable".into()))?;
-
-        let parts: Vec<&str> = args.split_whitespace().collect();
-        let (profile, env) = match parts.as_slice() {
-            [] => match (&self.active_profile, &self.active_env) {
-                (Some(p), Some(e)) => (p.clone(), e.clone()),
-                _ => {
-                    self.transcript.push(TranscriptEntry::Info(
-                        "usage: /save <profile> [env] (no active profile to update)".into(),
-                    ));
-                    return Ok(());
-                },
-            },
-            [p] => (p.to_string(), "default".to_string()),
-            [p, e, ..] => (p.to_string(), e.to_string()),
+        let Some((profile, env)) = self.resolve_save_target(args) else {
+            return Ok(());
         };
-
         if self.schema.is_none() {
-            match naque_schema::introspect(&mut *self.db.lock().await).await {
+            match self.introspect_future().await {
                 Ok(model) => {
-                    let count = model.tables.len();
-                    self.schema = Some(model);
-                    self.transcript.push(TranscriptEntry::Info(format!("learned {count} table(s)")));
+                    let n = model.tables.len();
+                    self.set_schema(model);
+                    self.push_info(format!("learned {n} table(s)"));
                 },
                 Err(e) => {
                     self.transcript.push(TranscriptEntry::Error(format!("learn failed: {e}")));
@@ -1080,6 +1066,94 @@ impl App {
                 },
             }
         }
+        let Some(schema_md) = self.schema_markdown_current() else {
+            self.transcript
+                .push(TranscriptEntry::Error("no schema to save; connect and /learn first".into()));
+            return Ok(());
+        };
+        let (agent, outcome) = self.overview_future(schema_md).await;
+        self.restore_agent(agent);
+        if let Some(err) = outcome.error {
+            self.push_info(format!("overview generation failed: {err}"));
+        }
+        self.finish_save(&profile, &env, &outcome.text)
+    }
+
+    /// Parse `/save` args into `(profile, env)`. On the no-args-and-no-active
+    /// case, push the usage hint and return `None`.
+    pub(crate) fn resolve_save_target(&mut self, args: &str) -> Option<(String, String)> {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        match parts.as_slice() {
+            [] => match (&self.active_profile, &self.active_env) {
+                (Some(p), Some(e)) => Some((p.clone(), e.clone())),
+                _ => {
+                    self.push_info("usage: /save <profile> [env] (no active profile to update)");
+                    None
+                },
+            },
+            [p] => Some((p.to_string(), "default".to_string())),
+            [p, e, ..] => Some((p.to_string(), e.to_string())),
+        }
+    }
+
+    /// Owned schema-introspection future. Clones the `Arc<Mutex<Database>>` so
+    /// the future is `'static` and does not borrow `self`, letting a concurrent
+    /// spinner draw borrow `&App`.
+    pub(crate) fn introspect_future(
+        &self,
+    ) -> impl std::future::Future<Output = Result<naque_schema::SchemaModel, naque_schema::SchemaError>> + 'static {
+        let db = Arc::clone(&self.db);
+        async move { naque_schema::introspect(&mut *db.lock().await).await }
+    }
+
+    pub(crate) fn schema_markdown_current(&self) -> Option<String> {
+        self.schema.as_ref().map(naque_schema::schema_markdown)
+    }
+
+    /// Owned overview-generation future. Takes the agent out of its slot and
+    /// returns it back out so the caller can restore it; the future owns the
+    /// agent + schema markdown and is `'static`.
+    pub(crate) fn overview_future(
+        &mut self,
+        schema_md: String,
+    ) -> impl std::future::Future<Output = (Option<Agent>, OverviewOutcome)> + 'static {
+        const SYSTEM: &str = "You are a database expert. In 4-8 sentences, explain what this schema represents: \
+                      the key entities, important relationships, naming conventions, and any gotchas. \
+                      Do not restate every column.";
+        let agent = self.agent_slot.take();
+        async move {
+            let outcome = match agent.as_ref() {
+                Some(a) => match a.complete_once(SYSTEM, &schema_md).await {
+                    Ok(t) if !t.trim().is_empty() => OverviewOutcome { text: t, error: None },
+                    Ok(_) => OverviewOutcome {
+                        text: "(overview unavailable: empty response)".into(),
+                        error: None,
+                    },
+                    Err(e) => OverviewOutcome {
+                        text: "(overview unavailable)".into(),
+                        error: Some(e.to_string()),
+                    },
+                },
+                None => OverviewOutcome {
+                    text: "(overview unavailable: no agent)".into(),
+                    error: None,
+                },
+            };
+            (agent, outcome)
+        }
+    }
+
+    pub(crate) fn restore_agent(&mut self, agent: Option<Agent>) {
+        self.agent_slot = agent;
+    }
+
+    /// Synchronous tail of `/save`: persist the (secret-stripped) connection,
+    /// the schema, and the assembled context, then update active state.
+    pub(crate) fn finish_save(&mut self, profile: &str, env: &str, overview: &str) -> Result<(), AppError> {
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| AppError::Other("profile store unavailable".into()))?;
         let Some(model) = self.schema.clone() else {
             self.transcript
                 .push(TranscriptEntry::Error("no schema to save; connect and /learn first".into()));
@@ -1094,7 +1168,7 @@ impl App {
             if had {
                 self.transcript.push(TranscriptEntry::Info(format!(
                     "connection saved without its password — add password_env/password_keyring to [environments.{env}] in {}",
-                    store.profile_dir(&profile).join("profile.toml").display()
+                    store.profile_dir(profile).join("profile.toml").display()
                 )));
             }
         }
@@ -1113,56 +1187,42 @@ impl App {
         }
 
         let mut loaded = store
-            .load_profile(&profile)
+            .load_profile(profile)
             .map_err(|e| AppError::Other(e.to_string()))?
             .unwrap_or_default();
-        loaded.environments.insert(env.clone(), spec.clone());
+        loaded.environments.insert(env.to_string(), spec.clone());
         if loaded.default_environment.is_none() {
-            loaded.default_environment = Some(env.clone());
+            loaded.default_environment = Some(env.to_string());
         }
         store
-            .save_profile(&profile, &loaded)
+            .save_profile(profile, &loaded)
             .map_err(|e| AppError::Other(e.to_string()))?;
 
-        naque_schema::save_schema(&store.profile_dir(&profile), &model).map_err(|e| AppError::Other(e.to_string()))?;
+        naque_schema::save_schema(&store.profile_dir(profile), &model).map_err(|e| AppError::Other(e.to_string()))?;
 
         let schema_md = naque_schema::schema_markdown(&model);
-        let prior = std::fs::read_to_string(store.context_path(&profile)).unwrap_or_default();
+        let prior = std::fs::read_to_string(store.context_path(profile)).unwrap_or_default();
         let notes = naque_schema::extract_notes(&prior);
-        let overview = self.generate_overview(&schema_md).await;
-        let doc = naque_schema::assemble_context(&profile, &schema_md, &overview, &notes);
-        std::fs::write(store.context_path(&profile), &doc).map_err(|e| AppError::Other(e.to_string()))?;
+        let doc = naque_schema::assemble_context(profile, &schema_md, overview, &notes);
+        std::fs::write(store.context_path(profile), &doc).map_err(|e| AppError::Other(e.to_string()))?;
 
-        self.active_profile = Some(profile.clone());
-        self.active_env = Some(env.clone());
+        self.active_profile = Some(profile.to_string());
+        self.active_env = Some(env.to_string());
         self.active_connection = Some(spec);
         self.active_context = Some(doc);
-        self.profile_name = profile.clone();
+        self.profile_name = profile.to_string();
         self.transcript
             .push(TranscriptEntry::Info(format!("saved profile {profile}/{env}")));
         Ok(())
     }
+}
 
-    /// Ask the model for a short overview of the schema. Failure is non-fatal:
-    /// returns a placeholder so the save still succeeds.
-    async fn generate_overview(&mut self, schema_md: &str) -> String {
-        let system = "You are a database expert. In 4-8 sentences, explain what this schema represents: \
-                      the key entities, important relationships, naming conventions, and any gotchas. \
-                      Do not restate every column.";
-        let result = match self.agent_slot.as_ref() {
-            Some(agent) => agent.complete_once(system, schema_md).await,
-            None => return "(overview unavailable: no agent)".to_string(),
-        };
-        match result {
-            Ok(text) if !text.trim().is_empty() => text,
-            Ok(_) => "(overview unavailable: empty response)".to_string(),
-            Err(e) => {
-                self.transcript
-                    .push(TranscriptEntry::Info(format!("overview generation failed: {e}")));
-                "(overview unavailable)".to_string()
-            },
-        }
-    }
+/// Result of an overview-generation attempt. `error` carries the failure
+/// message (non-fatal) so the caller can surface it while `text` always holds
+/// usable content (a placeholder on failure).
+pub(crate) struct OverviewOutcome {
+    pub text: String,
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
