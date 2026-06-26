@@ -495,19 +495,22 @@ impl App {
             .cloned()
             .ok_or_else(|| AppError::Other(format!("environment '{env}' not found in profile '{profile}'")))?;
 
-        // Resolve URL (password via keyring/env/inline) — never connect on error.
+        // All fallible work first — resolve, load schema/context, then connect —
+        // so any failure leaves `self` untouched (connect is the last fallible step).
         let url = spec
             .resolve_url(&naque_profile::SystemSecrets)
             .map_err(|e| AppError::Other(format!("cannot resolve connection: {e}")))?;
+        let new_schema =
+            naque_schema::load_schema(&store.profile_dir(profile)).map_err(|e| AppError::Other(e.to_string()))?;
+        let new_context = std::fs::read_to_string(store.context_path(profile)).ok();
         let new_db = naque_db::Database::connect(&url)
             .await
             .map_err(|e| AppError::Other(format!("connect failed (keeping current session): {e}")))?;
 
-        // Commit the switch only after a successful connect.
+        // Commit — all infallible from here.
         *self.db.lock().await = new_db;
-        self.schema =
-            naque_schema::load_schema(&store.profile_dir(profile)).map_err(|e| AppError::Other(e.to_string()))?;
-        self.active_context = std::fs::read_to_string(store.context_path(profile)).ok();
+        self.schema = new_schema;
+        self.active_context = new_context;
         if let Some(mode_str) = &loaded.config.mode
             && let Ok(m) = mode_str.parse::<naque_core::PermissionMode>()
         {
@@ -1475,6 +1478,11 @@ mod spawn_tests {
         std::fs::write(store.context_path("shop"), "# shop — context\n\n## Schema\n\n### marker_table\n").unwrap();
         app.set_active_profile(store.clone(), Some("shop".into()), Some("prod".into()), None);
 
+        // Mark the initial (prod) connection with a table that only exists there.
+        app.handle_line("!CREATE TABLE prod_only(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+
         app.switch_to("shop", "dev").await.expect("switch");
 
         app.handle_line("!CREATE TABLE dev_only(id INTEGER)", &mut AutoApprove)
@@ -1482,5 +1490,13 @@ mod spawn_tests {
             .unwrap();
         assert_eq!(app.active_env.as_deref(), Some("dev"));
         assert!(app.turn_context().contains("marker_table"));
+
+        // Prove the DB actually swapped to a distinct file: `prod_only` only
+        // exists on the prod file, so querying it on dev must error.
+        app.handle_line("!SELECT * FROM prod_only", &mut AutoApprove).await.ok();
+        assert!(
+            app.transcript().iter().any(|e| matches!(e, TranscriptEntry::Error(_))),
+            "prod_only must be absent on dev (different DB)"
+        );
     }
 }
