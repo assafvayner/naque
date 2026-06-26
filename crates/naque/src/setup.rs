@@ -236,6 +236,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(pick_environment(&p2, None).as_deref(), Some("default")); // env named "default"
+        // 4th tier: no default_environment, no "default" key → first env by BTreeMap order.
+        let mut e = std::collections::BTreeMap::new();
+        e.insert("beta".to_string(), ConnectionSpec::default());
+        e.insert("alpha".to_string(), ConnectionSpec::default());
+        let p3 = Profile {
+            default_environment: None,
+            environments: e,
+            ..Default::default()
+        };
+        assert_eq!(pick_environment(&p3, None).as_deref(), Some("alpha"));
+        // and None when there are no environments at all
+        let p4 = Profile::default();
+        assert_eq!(pick_environment(&p4, None), None);
     }
 
     #[test]
