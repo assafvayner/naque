@@ -490,23 +490,10 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                         dispatch_line(app, &line).await;
                         if app.should_quit() { break; }
                     },
-                    KeyCode::PageUp => {
-                        app.live.follow = false;
-                        app.live.scroll_offset = app.live.scroll_offset.saturating_add(5);
-                    },
-                    KeyCode::PageDown => {
-                        app.live.scroll_offset = app.live.scroll_offset.saturating_sub(5);
-                        if app.live.scroll_offset == 0 {
-                            app.live.follow = true;
-                            app.live.new_below = 0;
-                        }
-                    },
+                    KeyCode::PageUp => app.live.scroll_up(5),
+                    KeyCode::PageDown => app.live.scroll_down(5),
                     // Ctrl+End jumps the transcript to the latest entry.
-                    KeyCode::End if ctrl => {
-                        app.live.scroll_offset = 0;
-                        app.live.follow = true;
-                        app.live.new_below = 0;
-                    },
+                    KeyCode::End if ctrl => app.live.scroll_to_latest(),
                     // --- input editing (disabled while a turn runs) ---
                     KeyCode::Left if editable => input.move_left(),
                     KeyCode::Right if editable => input.move_right(),
