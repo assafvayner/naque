@@ -159,6 +159,39 @@ pub fn apply_event_to_transcript(
     }
 }
 
+/// One-line description of what the active permission mode lets the agent do.
+///
+/// Injected into each turn's context so the model's behavior tracks `/mode`
+/// changes. Without it the agent only infers the mode from tool rejections and
+/// keeps refusing writes after the user switches to a permissive mode.
+pub(crate) fn mode_guidance(mode: PermissionMode, catastrophic_guard: bool) -> String {
+    let base = match mode {
+        PermissionMode::Wildcard => {
+            "Permission mode: WILDCARD — every statement runs automatically without approval. \
+             Use run_query to execute INSERT, UPDATE, DELETE, and DDL directly when the user asks."
+        },
+        PermissionMode::Default => {
+            "Permission mode: DEFAULT — read-only queries run automatically; INSERT, UPDATE, \
+             DELETE, and DDL run only after the user approves a prompt. Go ahead and issue the \
+             write the user asked for — they will approve or reject it."
+        },
+        PermissionMode::ReadOnly => {
+            "Permission mode: READ-ONLY — read-only queries run automatically; any write or DDL \
+             prompts the user for approval before running. Prefer reads, but you may still issue \
+             a write the user explicitly requests."
+        },
+        PermissionMode::Strict => {
+            "Permission mode: STRICT — every statement, including reads, requires the user to \
+             approve it before it runs."
+        },
+    };
+    if catastrophic_guard && matches!(mode, PermissionMode::Wildcard) {
+        format!("{base} (Dropping or truncating objects still asks the user to confirm.)")
+    } else {
+        base.to_string()
+    }
+}
+
 #[cfg(test)]
 mod apply_tests {
     use naque_llm::AgentEvent;
@@ -462,9 +495,21 @@ impl App {
 
     // --- Natural language --------------------------------------------------
 
+    /// Per-turn context appended to the agent's system prompt: the active
+    /// permission mode (so behavior tracks `/mode`) then the schema catalog.
+    fn turn_context(&self) -> String {
+        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
+        let guidance = mode_guidance(self.mode, self.catastrophic_guard);
+        if catalog.is_empty() {
+            guidance
+        } else {
+            format!("{guidance}\n\n{catalog}")
+        }
+    }
+
     pub async fn handle_natural_language(&mut self, text: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
         self.transcript.push(TranscriptEntry::User(text.to_string()));
-        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
+        let context = self.turn_context();
 
         let mut agent = self.agent_slot.take().expect("agent available");
         let mut executor = QueryToolExecutor {
@@ -476,7 +521,7 @@ impl App {
             last_result: None,
         };
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = agent.run_turn(text, &catalog, &mut executor, &mut (), &cancel).await;
+        let result = agent.run_turn(text, &context, &mut executor, &mut (), &cancel).await;
         let exec_last = executor.last_result.take();
         self.agent_slot = Some(agent);
 
@@ -516,7 +561,7 @@ impl App {
         self.live = crate::live::LiveState::new(self.max_iterations);
         self.live.running = true;
 
-        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
+        let context = self.turn_context();
         // Safe: `can_start_turn` guaranteed the slot is full above.
         let mut agent = self.agent_slot.take().expect("agent available");
 
@@ -543,7 +588,7 @@ impl App {
                 last_result: None,
             };
             let result = agent
-                .run_turn(&input, &catalog, &mut executor, &mut observer, &cancel_task)
+                .run_turn(&input, &context, &mut executor, &mut observer, &cancel_task)
                 .await;
             let last_result = executor.last_result.take();
             crate::turn::TurnOutput {
@@ -1127,6 +1172,50 @@ pub mod tests {
         assert!(!app.should_quit());
         app.handle_line("/quit", &mut AutoApprove).await.unwrap();
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn mode_guidance_describes_each_mode() {
+        assert!(mode_guidance(PermissionMode::Wildcard, false).contains("WILDCARD"));
+        assert!(
+            mode_guidance(PermissionMode::Wildcard, false)
+                .to_ascii_lowercase()
+                .contains("insert")
+        );
+        assert!(mode_guidance(PermissionMode::ReadOnly, false).contains("READ-ONLY"));
+        assert!(mode_guidance(PermissionMode::Default, false).contains("DEFAULT"));
+        assert!(mode_guidance(PermissionMode::Strict, false).contains("STRICT"));
+    }
+
+    #[test]
+    fn mode_guidance_notes_guard_only_in_wildcard() {
+        assert!(
+            mode_guidance(PermissionMode::Wildcard, true)
+                .to_ascii_lowercase()
+                .contains("confirm")
+        );
+        assert!(
+            !mode_guidance(PermissionMode::Wildcard, false)
+                .to_ascii_lowercase()
+                .contains("confirm")
+        );
+    }
+
+    /// Regression: switching mode via `/mode` must change what the agent is
+    /// told each turn, so it stops refusing writes after going to wildcard.
+    #[tokio::test]
+    async fn turn_context_tracks_mode_changes() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::ReadOnly, vec![]).await;
+        assert!(app.turn_context().contains("READ-ONLY"));
+
+        app.handle_line("/mode wildcard", &mut AutoApprove).await.unwrap();
+        assert!(
+            app.turn_context().contains("WILDCARD"),
+            "after /mode wildcard the agent context must say WILDCARD, got: {}",
+            app.turn_context()
+        );
     }
 
     // ------------------------------------------------------------------
