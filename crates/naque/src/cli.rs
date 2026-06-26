@@ -82,6 +82,10 @@ pub struct Args {
     /// Profile name to launch (overrides naque.toml `project` / central default).
     pub profile: Option<String>,
 
+    /// Environment within the profile to connect to (prod/dev/test).
+    #[arg(long)]
+    pub env: Option<String>,
+
     /// Explicit connection string (overrides profile resolution).
     #[arg(long)]
     pub url: Option<String>,
@@ -192,6 +196,13 @@ mod tests {
         let t = after_long_help_text(true);
         assert!(t.contains("\x1b[1;36mEXAMPLES:"));
         assert!(t.contains("\x1b[1;36mCONFIG FILES:"));
+    }
+
+    #[test]
+    fn parses_env_flag() {
+        let args = Args::try_parse_from(["naque", "shop", "--env", "dev"]).unwrap();
+        assert_eq!(args.profile.as_deref(), Some("shop"));
+        assert_eq!(args.env.as_deref(), Some("dev"));
     }
 
     #[test]

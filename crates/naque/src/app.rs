@@ -458,9 +458,7 @@ impl App {
 
     /// Install the profile store and the active profile/env identity (called by
     /// `setup` at launch and by `switch_to`).
-    // Consumed by setup (launch) and switch_to in later tasks of this feature.
-    #[allow(dead_code)]
-    pub(crate) fn set_active_profile(
+    pub fn set_active_profile(
         &mut self,
         store: naque_profile::Store,
         profile: Option<String>,
@@ -474,6 +472,14 @@ impl App {
         self.active_profile = profile;
         self.active_env = env;
         self.active_connection = connection;
+    }
+
+    pub fn set_schema(&mut self, model: naque_schema::SchemaModel) {
+        self.schema = Some(model);
+    }
+
+    pub fn set_active_context(&mut self, doc: String) {
+        self.active_context = Some(doc);
     }
 
     pub(crate) fn list_profiles(&self) -> Result<Vec<String>, AppError> {
