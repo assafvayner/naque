@@ -476,6 +476,64 @@ impl App {
         self.active_connection = connection;
     }
 
+    /// Switch the live session to `profile`/`env`: reconnect the database, load
+    /// the profile's saved schema + context, apply its mode/row_cap, and clear
+    /// the agent's memory. On any failure the current session is left intact.
+    #[allow(dead_code)]
+    pub async fn switch_to(&mut self, profile: &str, env: &str) -> Result<(), AppError> {
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| AppError::Other("no profile store configured".into()))?;
+        let loaded = store
+            .load_profile(profile)
+            .map_err(|e| AppError::Other(e.to_string()))?
+            .ok_or_else(|| AppError::Other(format!("profile '{profile}' not found")))?;
+        let spec = loaded
+            .environments
+            .get(env)
+            .cloned()
+            .ok_or_else(|| AppError::Other(format!("environment '{env}' not found in profile '{profile}'")))?;
+
+        // Resolve URL (password via keyring/env/inline) — never connect on error.
+        let url = spec
+            .resolve_url(&naque_profile::SystemSecrets)
+            .map_err(|e| AppError::Other(format!("cannot resolve connection: {e}")))?;
+        let new_db = naque_db::Database::connect(&url)
+            .await
+            .map_err(|e| AppError::Other(format!("connect failed (keeping current session): {e}")))?;
+
+        // Commit the switch only after a successful connect.
+        *self.db.lock().await = new_db;
+        self.schema =
+            naque_schema::load_schema(&store.profile_dir(profile)).map_err(|e| AppError::Other(e.to_string()))?;
+        self.active_context = std::fs::read_to_string(store.context_path(profile)).ok();
+        if let Some(mode_str) = &loaded.config.mode
+            && let Ok(m) = mode_str.parse::<naque_core::PermissionMode>()
+        {
+            self.mode = m;
+        }
+        if let Some(cap) = loaded.config.row_cap {
+            self.row_cap = cap as usize;
+        }
+        if let Some(a) = self.agent_slot.as_mut() {
+            a.clear();
+        }
+        self.profile_name = profile.to_string();
+        self.active_profile = Some(profile.to_string());
+        self.active_env = Some(env.to_string());
+        self.active_connection = Some(spec);
+
+        if loaded.config.provider.is_some() || loaded.config.model.is_some() {
+            self.transcript.push(TranscriptEntry::Info(
+                "note: provider/model changes from this profile apply on next launch".to_string(),
+            ));
+        }
+        self.transcript
+            .push(TranscriptEntry::Info(format!("switched to {profile}/{env}")));
+        Ok(())
+    }
+
     // --- SQL execution -----------------------------------------------------
 
     /// Classify `sql`, run the permission gate, possibly prompt via `approver`,
@@ -1384,5 +1442,45 @@ mod spawn_tests {
         app.start_turn("hi"); // must NOT panic
         assert!(!app.is_turn_running());
         assert!(app.transcript().iter().any(|e| matches!(e, TranscriptEntry::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn switch_to_reconnects_and_loads_schema_context() {
+        use naque_profile::{ConnectionSpec, Profile, ProfileEngine, Store};
+
+        use crate::approval::AutoApprove;
+
+        let home = tempfile::tempdir().unwrap();
+        let prod_db = tempfile::NamedTempFile::new().unwrap();
+        let dev_db = tempfile::NamedTempFile::new().unwrap();
+
+        let prod_url = format!("sqlite:{}", prod_db.path().display());
+        let mut app = tests::make_app(&prod_url, PermissionMode::Wildcard, vec![]).await;
+
+        let store = Store::open(home.path());
+        let spec = |p: &std::path::Path| ConnectionSpec {
+            engine: Some(ProfileEngine::Sqlite),
+            path: Some(p.display().to_string()),
+            ..Default::default()
+        };
+        let mut envs = std::collections::BTreeMap::new();
+        envs.insert("prod".to_string(), spec(prod_db.path()));
+        envs.insert("dev".to_string(), spec(dev_db.path()));
+        let profile = Profile {
+            default_environment: Some("dev".into()),
+            config: Default::default(),
+            environments: envs,
+        };
+        store.save_profile("shop", &profile).unwrap();
+        std::fs::write(store.context_path("shop"), "# shop — context\n\n## Schema\n\n### marker_table\n").unwrap();
+        app.set_active_profile(store.clone(), Some("shop".into()), Some("prod".into()), None);
+
+        app.switch_to("shop", "dev").await.expect("switch");
+
+        app.handle_line("!CREATE TABLE dev_only(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        assert_eq!(app.active_env.as_deref(), Some("dev"));
+        assert!(app.turn_context().contains("marker_table"));
     }
 }
