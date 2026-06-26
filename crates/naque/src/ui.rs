@@ -501,7 +501,8 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                             app.live.new_below = 0;
                         }
                     },
-                    KeyCode::End => {
+                    // Ctrl+End jumps the transcript to the latest entry.
+                    KeyCode::End if ctrl => {
                         app.live.scroll_offset = 0;
                         app.live.follow = true;
                         app.live.new_below = 0;
@@ -510,6 +511,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                     KeyCode::Left if editable => input.move_left(),
                     KeyCode::Right if editable => input.move_right(),
                     KeyCode::Home if editable => input.move_home(),
+                    KeyCode::End if editable => input.move_end(),
                     KeyCode::Char('a') if editable && ctrl => input.move_home(),
                     KeyCode::Char('e') if editable && ctrl => input.move_end(),
                     KeyCode::Delete if editable => input.delete(),

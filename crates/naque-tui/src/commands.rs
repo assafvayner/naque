@@ -98,8 +98,8 @@ pub fn help_text() -> String {
     out.push_str(
         "\n\
          Keys:\n\
-         \u{20} ←/→ move cursor   Ctrl+A/Ctrl+E line start/end   Tab complete\n\
-         \u{20} PgUp/PgDn scroll  End jump to latest   Ctrl+C cancel / quit\n",
+         \u{20} ←/→ move cursor   Home/End or Ctrl+A/Ctrl+E line start/end   Tab complete\n\
+         \u{20} PgUp/PgDn scroll  Ctrl+End jump to latest   Ctrl+C cancel / quit\n",
     );
     out
 }
