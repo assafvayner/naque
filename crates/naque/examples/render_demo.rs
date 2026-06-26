@@ -42,7 +42,7 @@ fn main() {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| naque::ui::render(f, &app, &theme, "show me recent orders", None))
+            .draw(|f| naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from("show me recent orders"), None))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
         frames.push(("Frame 1: Main view — color, default mode (110×30)".to_string(), buffer_to_html(&buf)));
@@ -55,7 +55,7 @@ fn main() {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| naque::ui::render(f, &app, &theme, "show me recent orders", None))
+            .draw(|f| naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from("show me recent orders"), None))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
         frames.push(("Frame 2: Main view — NO_COLOR (110×30)".to_string(), buffer_to_html(&buf)));
@@ -75,7 +75,7 @@ fn main() {
         );
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, "", Some(&prompt));
+                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), Some(&prompt));
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -96,7 +96,7 @@ fn main() {
         );
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, "", Some(&prompt));
+                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), Some(&prompt));
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -117,7 +117,7 @@ fn main() {
         );
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, "", Some(&prompt));
+                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), Some(&prompt));
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -146,7 +146,9 @@ fn main() {
         let (w, h) = (110u16, 30u16);
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| naque::ui::render(f, &live_app, &theme, "", None)).unwrap();
+        terminal
+            .draw(|f| naque::ui::render(f, &live_app, &theme, &naque_tui::InputLine::from(""), None))
+            .unwrap();
         let buf = terminal.backend().buffer().clone();
 
         // Plain-text dump for legibility review (color frame).
@@ -167,7 +169,9 @@ fn main() {
         let (w, h) = (110u16, 30u16);
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| naque::ui::render(f, &live_app, &theme, "", None)).unwrap();
+        terminal
+            .draw(|f| naque::ui::render(f, &live_app, &theme, &naque_tui::InputLine::from(""), None))
+            .unwrap();
         let buf = terminal.backend().buffer().clone();
 
         // Plain-text dump for legibility review (no-color frame).

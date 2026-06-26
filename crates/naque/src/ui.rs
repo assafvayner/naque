@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::StreamExt;
-use naque_tui::{ActivityLine, ApprovalPrompt, ResultTable, StatusBar, Theme};
+use naque_tui::{ActivityLine, ApprovalPrompt, InputLine, ResultTable, StatusBar, Theme};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::ExecutableCommand;
 use ratatui::crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -37,7 +37,7 @@ fn estimate_cost_usd(usage: &naque_llm::Usage) -> f64 {
 /// 4. Approval prompt — overlaid when `pending` is Some.
 /// 5. Status bar — single line.
 /// 6. Input line — `> {input}`.
-pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending: Option<&ApprovalPrompt>) {
+pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pending: Option<&ApprovalPrompt>) {
     let size = frame.area();
 
     // Determine heights: input = 1, status = 1, result = up to 8 if present,
@@ -146,14 +146,25 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &str, pending:
 
     // ---- Input line --------------------------------------------------------
     {
-        let line = Line::from(Span::raw(format!("> {input}")));
-        frame.render_widget(Paragraph::new(line), chunks[4]);
+        let input_chunk = chunks[4];
+        const PREFIX: &str = "> ";
+        let prefix_w = PREFIX.len() as u16;
+        let text_w = input_chunk.width.saturating_sub(prefix_w);
+        let view = input.view(text_w);
+        let line = Line::from(Span::raw(format!("{PREFIX}{}", view.visible)));
+        frame.render_widget(Paragraph::new(line), input_chunk);
+
+        // Place the terminal cursor at the input position. Skipped while an
+        // approval modal owns focus (it has its own input handling).
+        if pending.is_none() {
+            let cx = input_chunk.x + prefix_w + view.cursor_col;
+            frame.set_cursor_position((cx, input_chunk.y));
+        }
 
         // After a first idle Ctrl+C, prompt the user that another press exits.
         if app.quit_armed {
             let hint = "press ^C again to exit";
             let hint_w = hint.len() as u16;
-            let input_chunk = chunks[4];
             if input_chunk.width > hint_w {
                 let hint_area = Rect {
                     x: input_chunk.x + input_chunk.width - hint_w,
@@ -312,7 +323,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
     theme: &Theme,
     terminal: &mut Terminal<B>,
 ) -> anyhow::Result<()> {
-    let mut input_buf = String::new();
+    let mut input = InputLine::new();
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(80));
     let mut pending: Option<(ApprovalRequest, ApprovalPrompt)> = None;
@@ -320,7 +331,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
     loop {
         {
             let prompt_ref = pending.as_ref().map(|(_, p)| p);
-            terminal.draw(|f| render(f, app, theme, &input_buf, prompt_ref))?;
+            terminal.draw(|f| render(f, app, theme, &input, prompt_ref))?;
         }
 
         tokio::select! {
@@ -357,9 +368,11 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 }
                 app.quit_armed = false;
 
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let editable = !app.is_turn_running();
                 match key.code {
-                    KeyCode::Enter if !app.is_turn_running() => {
-                        let line = std::mem::take(&mut input_buf);
+                    KeyCode::Enter if editable => {
+                        let line = input.take();
                         if line.trim().is_empty() { continue; }
                         dispatch_line(app, &line).await;
                         if app.should_quit() { break; }
@@ -380,8 +393,15 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                         app.live.follow = true;
                         app.live.new_below = 0;
                     },
-                    KeyCode::Backspace if !app.is_turn_running() => { input_buf.pop(); },
-                    KeyCode::Char(c) if !app.is_turn_running() => { input_buf.push(c); },
+                    // --- input editing (disabled while a turn runs) ---
+                    KeyCode::Left if editable => input.move_left(),
+                    KeyCode::Right if editable => input.move_right(),
+                    KeyCode::Home if editable => input.move_home(),
+                    KeyCode::Char('a') if editable && ctrl => input.move_home(),
+                    KeyCode::Char('e') if editable && ctrl => input.move_end(),
+                    KeyCode::Delete if editable => input.delete(),
+                    KeyCode::Backspace if editable => input.backspace(),
+                    KeyCode::Char(c) if editable && !ctrl => input.insert(c),
                     _ => {},
                 }
             }
@@ -688,7 +708,9 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal.draw(|f| render(f, &app, &theme, "draft input", None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from("draft input"), None))
+            .unwrap();
 
         let text = buf_text(&terminal);
         assert!(text.contains("testprofile"), "expected profile name in buffer:\n{text}");
@@ -708,7 +730,9 @@ mod tests {
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal.draw(|f| render(f, &app, &theme, "", Some(&prompt))).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), Some(&prompt)))
+            .unwrap();
 
         let text = buf_text(&terminal);
         assert!(text.contains("DROP TABLE foo"), "expected SQL in approval prompt:\n{text}");
@@ -745,7 +769,9 @@ mod tests {
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal.draw(|f| render(f, &app, &theme, "my query", None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from("my query"), None))
+            .unwrap();
 
         let text = buf_text(&terminal);
         assert!(text.contains("hello"), "expected 'hello' in buffer:\n{text}");
@@ -797,7 +823,7 @@ mod render_tests {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::new(true);
-        terminal.draw(|f| render(f, &app, &theme, "", None)).unwrap();
+        terminal.draw(|f| render(f, &app, &theme, &InputLine::from(""), None)).unwrap();
 
         let text = buffer_text(&terminal);
         assert!(text.contains("run_query"), "pinned line/step missing: {text:?}");
@@ -816,7 +842,9 @@ mod render_tests {
 
         let backend = TestBackend::new(80, 8);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &app, &Theme::new(false), "", None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::new(false), &InputLine::from(""), None))
+            .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("run_query") && text.contains("iter 3/"), "{text:?}");
     }
@@ -831,12 +859,16 @@ mod render_tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         // Idle, not armed: no hint.
-        terminal.draw(|f| render(f, &app, &Theme::new(true), "", None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), None))
+            .unwrap();
         assert!(!buffer_text(&terminal).contains("again to exit"), "hint must not show when idle");
 
         // After a first idle Ctrl+C: the hint appears.
         app.quit_armed = true;
-        terminal.draw(|f| render(f, &app, &Theme::new(true), "", None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), None))
+            .unwrap();
         assert!(buffer_text(&terminal).contains("again to exit"), "hint must show when quit_armed");
     }
 }
