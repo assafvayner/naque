@@ -39,6 +39,30 @@ impl LiveState {
         }
     }
 
+    /// Scroll the transcript up (toward older entries) by `lines` rows, pausing
+    /// tail-follow. No content-length clamp: over-scrolling just shows blank
+    /// space, which `render` absorbs via `saturating_sub`.
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.follow = false;
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+    }
+
+    /// Scroll the transcript down (toward newer entries) by `lines` rows. On
+    /// reaching the tail (offset 0), resume following and clear the new-rows hint.
+    pub fn scroll_down(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        if self.scroll_offset == 0 {
+            self.scroll_to_latest();
+        }
+    }
+
+    /// Jump straight to the latest entry and resume following.
+    pub fn scroll_to_latest(&mut self) {
+        self.scroll_offset = 0;
+        self.follow = true;
+        self.new_below = 0;
+    }
+
     /// Fold one agent event into the live state.
     pub fn apply(&mut self, event: &AgentEvent) {
         match event {
@@ -116,5 +140,42 @@ mod tests {
         s.apply(&AgentEvent::TurnStarted);
         s.apply(&AgentEvent::Cancelled);
         assert!(!s.running);
+    }
+
+    #[test]
+    fn scroll_up_pauses_follow_and_raises_offset() {
+        let mut s = LiveState::new(12);
+        assert!(s.follow);
+        s.scroll_up(5);
+        assert!(!s.follow);
+        assert_eq!(s.scroll_offset, 5);
+        s.scroll_up(3);
+        assert_eq!(s.scroll_offset, 8);
+    }
+
+    #[test]
+    fn scroll_down_saturates_and_restores_follow_at_tail() {
+        let mut s = LiveState::new(12);
+        s.scroll_up(5);
+        s.new_below = 4;
+        s.scroll_down(2);
+        assert_eq!(s.scroll_offset, 3);
+        assert!(!s.follow, "still scrolled up, must not follow");
+        assert_eq!(s.new_below, 4, "hint stays until the tail is reached");
+        s.scroll_down(10); // saturates at 0
+        assert_eq!(s.scroll_offset, 0);
+        assert!(s.follow);
+        assert_eq!(s.new_below, 0);
+    }
+
+    #[test]
+    fn scroll_to_latest_resets_to_tail() {
+        let mut s = LiveState::new(12);
+        s.scroll_up(7);
+        s.new_below = 3;
+        s.scroll_to_latest();
+        assert_eq!(s.scroll_offset, 0);
+        assert!(s.follow);
+        assert_eq!(s.new_below, 0);
     }
 }
