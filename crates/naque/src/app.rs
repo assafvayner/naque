@@ -1352,6 +1352,29 @@ pub mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Test 3.4: Secret-isolation regression
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn turn_context_never_contains_connection_secrets() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        app.active_connection = Some(naque_profile::ConnectionSpec {
+            host: Some("h".into()),
+            user: Some("u".into()),
+            password: Some("TOP_SECRET_PW".into()),
+            password_env: Some("PROD_PW".into()),
+            ..Default::default()
+        });
+        app.active_context = Some("## Schema\n\n### orders\n- id bigint".into());
+        let ctx = app.turn_context();
+        assert!(!ctx.contains("TOP_SECRET_PW"));
+        assert!(!ctx.contains("PROD_PW"));
+        assert!(!ctx.contains("password"));
+    }
+
+    // ------------------------------------------------------------------
     // Test 8: AcceptEdited re-gates and runs the new SQL
     // ------------------------------------------------------------------
 
