@@ -119,7 +119,10 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
         }
     }
 
-    if matches!(tn.as_str(), "float8" | "double precision" | "float4" | "real" | "numeric" | "decimal") {
+    // numeric/decimal are intentionally excluded here so they fall through to the
+    // BigDecimal branch below — decoding them as f64 would render them lossily and
+    // disagree with how numeric[] arrays render.
+    if matches!(tn.as_str(), "float8" | "double precision" | "float4" | "real") {
         if let Ok(v) = row.try_get::<f64, _>(i) {
             return Some(v.to_string());
         }
