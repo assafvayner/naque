@@ -33,6 +33,9 @@ sqlx = { version = "0.8", default-features = false, features = [
     "uuid",
     "json",
     "bigdecimal",
+    "ipnetwork",
+    "mac_address",
+    "bit-vec",
 ] }
 tempfile = "3"
 thiserror = "1"
