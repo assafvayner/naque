@@ -1732,6 +1732,51 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn save_restores_agent_after_overview() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+        let overview = LlmResponse {
+            text: Some("An overview.".into()),
+            tool_calls: vec![],
+            usage: LlmUsage {
+                input_tokens: 5,
+                output_tokens: 5,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![overview]).await;
+        app.handle_line("!CREATE TABLE orders(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        app.set_active_profile(Store::open(home.path()), None, None, Some(Default::default()));
+
+        assert!(app.agent_slot.is_some(), "agent present before save");
+        app.handle_line("/save shop dev", &mut AutoApprove).await.unwrap();
+        assert!(app.agent_slot.is_some(), "agent must be restored after overview generation");
+    }
+
+    #[tokio::test]
+    async fn resolve_save_target_arms() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+
+        assert_eq!(app.resolve_save_target("shop"), Some(("shop".into(), "default".into())));
+        assert_eq!(app.resolve_save_target("shop dev"), Some(("shop".into(), "dev".into())));
+
+        app.active_profile = Some("active".into());
+        app.active_env = Some("prod".into());
+        assert_eq!(app.resolve_save_target(""), Some(("active".into(), "prod".into())));
+
+        app.active_profile = None;
+        app.active_env = None;
+        assert_eq!(app.resolve_save_target(""), None);
+    }
+
+    #[tokio::test]
     async fn save_defaults_env_to_default_and_no_args_uses_active() {
         use naque_profile::Store;
         let home = tempfile::tempdir().unwrap();

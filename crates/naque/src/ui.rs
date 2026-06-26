@@ -863,18 +863,22 @@ where
     let mut ticker = tokio::time::interval(Duration::from_millis(80));
     let empty = InputLine::new();
     let mut frame_idx = 0usize;
+    let mut draw = |terminal: &mut Terminal<B>| {
+        let spinner = naque_tui::SPINNER_FRAMES[frame_idx % naque_tui::SPINNER_FRAMES.len()];
+        frame_idx = frame_idx.wrapping_add(1);
+        let _ = terminal.draw(|f| {
+            render(f, app, theme, &empty, None);
+            render_busy(f, theme, spinner, label);
+        });
+    };
+    // Draw the first frame up front so the label appears immediately, rather
+    // than after the first 80ms tick.
+    draw(terminal);
     loop {
         tokio::select! {
             biased;
             out = &mut fut => return out,
-            _ = ticker.tick() => {
-                let spinner = naque_tui::SPINNER_FRAMES[frame_idx % naque_tui::SPINNER_FRAMES.len()];
-                frame_idx = frame_idx.wrapping_add(1);
-                let _ = terminal.draw(|f| {
-                    render(f, app, theme, &empty, None);
-                    render_busy(f, theme, spinner, label);
-                });
-            }
+            _ = ticker.tick() => draw(terminal),
         }
     }
 }
@@ -1224,6 +1228,26 @@ mod render_tests {
             .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), None))
             .unwrap();
         assert!(buffer_text(&terminal).contains("again to exit"), "hint must show when quit_armed");
+    }
+
+    #[tokio::test]
+    async fn run_with_spinner_draws_label() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let app = crate::app::tests::make_app(&url, naque_core::PermissionMode::Wildcard, vec![]).await;
+        let theme = Theme::new(true);
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // `yield_now` forces at least one ticker draw before the future resolves,
+        // so `render_busy` runs at least once.
+        let out = run_with_spinner(&mut terminal, &app, &theme, "Learning schema…", async {
+            tokio::task::yield_now().await;
+            7usize
+        })
+        .await;
+        assert_eq!(out, 7);
+        assert!(buffer_text(&terminal).contains("Learning schema"), "spinner label must be drawn on the bottom row");
     }
 
     #[test]
