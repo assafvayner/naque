@@ -670,9 +670,10 @@ async fn dispatch_line<B: ratatui::backend::Backend>(
             // raw-SQL approval through the modal) — surface an explicit message
             // instead of silently approving or rejecting.
             if app.raw_sql_auto_approves(&sql).await {
+                let base = snapshot_app(terminal, app, theme);
                 let mut approver = crate::approval::AutoApprove;
                 let fut = app.execute_sql(&sql, naque_core::gate::QueryKind::Primary, &mut approver);
-                let _ = run_with_spinner(terminal, theme, "Running query…", fut).await;
+                let _ = run_with_spinner(terminal, &base, theme, "Running query…", fut).await;
             } else {
                 app.push_info(format!(
                     "Raw SQL needs approval in {} mode; modal approval for raw SQL is coming in the next step. \
@@ -687,8 +688,9 @@ async fn dispatch_line<B: ratatui::backend::Backend>(
                 "dt" => "Loading tables…",
                 _ => "Working…",
             };
+            let base = snapshot_app(terminal, app, theme);
             let fut = app.handle_db_command(&cmd);
-            let _ = run_with_spinner(terminal, theme, label, fut).await;
+            let _ = run_with_spinner(terminal, &base, theme, label, fut).await;
         },
         Input::ToolCommand(cmd) => {
             let _ = app.handle_tool_command(&cmd, &mut crate::approval::AutoApprove).await;
@@ -852,8 +854,9 @@ async fn connect_to<B: ratatui::backend::Backend>(
     profile: &str,
     env: &str,
 ) {
+    let base = snapshot_app(terminal, app, theme);
     let fut = app.switch_to(profile, env);
-    if let Err(e) = run_with_spinner(terminal, theme, &format!("Connecting to {profile}/{env}…"), fut).await {
+    if let Err(e) = run_with_spinner(terminal, &base, theme, &format!("Connecting to {profile}/{env}…"), fut).await {
         app.push_info(format!("switch failed: {e}"));
     }
 }
@@ -879,10 +882,33 @@ async fn handle_env_command<B: ratatui::backend::Backend>(app: &mut App, theme: 
 const SPINNER_GRACE: Duration = Duration::from_millis(120);
 const SPINNER_TICK: Duration = Duration::from_millis(80);
 
-/// Drive `fut` to completion while showing a centered "busy" modal once it has
-/// run longer than a short grace period (so fast operations never flash it).
-/// The modal touches only `theme`/`label`, so `fut` may borrow `&mut App`.
-async fn run_with_spinner<B, T, Fut>(terminal: &mut Terminal<B>, theme: &Theme, label: &str, fut: Fut) -> T
+/// Render the current app frame and return it as an owned buffer, so a slow
+/// operation can keep the chat visible behind an animated progress line without
+/// holding a borrow on `app` (which the operation's future needs mutably).
+fn snapshot_app<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    app: &App,
+    theme: &Theme,
+) -> ratatui::buffer::Buffer {
+    let empty = InputLine::new();
+    let area = terminal.get_frame().area();
+    terminal
+        .draw(|f| render(f, app, theme, &empty, None))
+        .map(|completed| completed.buffer.clone())
+        .unwrap_or_else(|_| ratatui::buffer::Buffer::empty(area))
+}
+
+/// Drive `fut` to completion while keeping `base` (a chat snapshot) visible and
+/// overlaying an animated bottom progress line once the operation has run longer
+/// than a short grace period (so fast operations never flash it). `base` is an
+/// owned buffer, so `fut` may borrow `&mut App`.
+async fn run_with_spinner<B, T, Fut>(
+    terminal: &mut Terminal<B>,
+    base: &ratatui::buffer::Buffer,
+    theme: &Theme,
+    label: &str,
+    fut: Fut,
+) -> T
 where
     B: ratatui::backend::Backend,
     Fut: std::future::Future<Output = T>,
@@ -898,34 +924,34 @@ where
             _ = ticker.tick() => {
                 let spinner = naque_tui::SPINNER_FRAMES[frame_idx % naque_tui::SPINNER_FRAMES.len()];
                 frame_idx = frame_idx.wrapping_add(1);
-                let _ = terminal.draw(|f| render_busy(f, theme, spinner, label));
+                let _ = terminal.draw(|f| {
+                    let buf = f.buffer_mut();
+                    if buf.area == base.area {
+                        buf.clone_from(base);
+                    }
+                    render_busy(f, theme, spinner, label);
+                });
             }
         }
     }
 }
 
-/// Draw a small centered modal showing `⟨spinner⟩ ⟨label⟩` while a slow phase
-/// runs. Touches only `theme`/`label`/spinner so it can coexist with a future
-/// that borrows `&mut App`.
+/// Overlay an animated `⟨spinner⟩ ⟨label⟩` progress line on the bottom row,
+/// leaving the snapshotted chat visible above it.
 fn render_busy(frame: &mut Frame, theme: &Theme, spinner: &str, label: &str) {
     let area = frame.area();
-    if area.width == 0 || area.height == 0 {
+    if area.height == 0 {
         return;
     }
-    let width = (label.chars().count() as u16 + 6).min(area.width);
-    let height = 3.min(area.height);
-    let rect = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
+    let row = Rect {
+        x: 0,
+        y: area.height - 1,
+        width: area.width,
+        height: 1,
     };
-    frame.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(" working ");
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
+    frame.render_widget(Clear, row);
     let line = Line::from(Span::styled(format!("{spinner} {label}"), theme.activity_style()));
-    frame.render_widget(Paragraph::new(line).alignment(ratatui::layout::Alignment::Center), inner);
+    frame.render_widget(Paragraph::new(line), row);
 }
 
 /// Interactive `/save`: animate a phase-labelled spinner across the two slow
@@ -940,8 +966,9 @@ async fn handle_save_command<B: ratatui::backend::Backend>(
         return;
     };
     if app.schema().is_none() {
+        let base = snapshot_app(terminal, app, theme);
         let fut = app.introspect_future();
-        match run_with_spinner(terminal, theme, "Learning schema…", fut).await {
+        match run_with_spinner(terminal, &base, theme, "Learning schema…", fut).await {
             Ok(model) => {
                 let n = model.tables.len();
                 app.set_schema(model);
@@ -957,8 +984,9 @@ async fn handle_save_command<B: ratatui::backend::Backend>(
         app.push_info("no schema to save; connect and /learn first");
         return;
     };
+    let base = snapshot_app(terminal, app, theme);
     let fut = app.overview_future(schema_md);
-    let (agent, outcome) = run_with_spinner(terminal, theme, "Generating overview…", fut).await;
+    let (agent, outcome) = run_with_spinner(terminal, &base, theme, "Generating overview…", fut).await;
     app.restore_agent(agent);
     if let Some(err) = outcome.error {
         app.push_info(format!("overview generation failed: {err}"));
@@ -970,8 +998,9 @@ async fn handle_save_command<B: ratatui::backend::Backend>(
 
 /// Interactive `/learn`: introspect the schema with a progress spinner.
 async fn handle_learn_command<B: ratatui::backend::Backend>(app: &mut App, theme: &Theme, terminal: &mut Terminal<B>) {
+    let base = snapshot_app(terminal, app, theme);
     let fut = app.introspect_future();
-    match run_with_spinner(terminal, theme, "Learning schema…", fut).await {
+    match run_with_spinner(terminal, &base, theme, "Learning schema…", fut).await {
         Ok(model) => {
             let n = model.tables.len();
             app.set_schema(model);
@@ -1175,7 +1204,8 @@ mod tests {
 
         // With `biased;` and the grace period, an already-ready future returns
         // its value immediately, drawing nothing.
-        let out = run_with_spinner(&mut terminal, &theme, "Working…", async { 42usize }).await;
+        let base = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 10));
+        let out = run_with_spinner(&mut terminal, &base, &theme, "Working…", async { 42usize }).await;
         assert_eq!(out, 42);
     }
 
@@ -1186,11 +1216,37 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         // A future that finishes before the grace period must never draw the
-        // modal. With a paused clock the grace timer never fires for an
+        // progress line. With a paused clock the grace timer never fires for an
         // already-ready future, so the buffer stays blank.
-        let out = run_with_spinner(&mut terminal, &theme, "Learning schema…", async { 7usize }).await;
+        let base = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 10));
+        let out = run_with_spinner(&mut terminal, &base, &theme, "Learning schema…", async { 7usize }).await;
         assert_eq!(out, 7);
-        assert!(!buf_text(&terminal).contains("Learning schema"), "fast op must not flash the busy modal");
+        assert!(!buf_text(&terminal).contains("Learning schema"), "fast op must not flash the progress line");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_with_spinner_keeps_base_visible() {
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // A base snapshot carrying distinctive chat content.
+        let mut base = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 10));
+        base.set_string(0, 0, "chat-marker", theme.dim_style());
+
+        // The future completes only after the grace period elapses, so the
+        // progress line is drawn at least once. `start_paused` auto-advances the
+        // clock, so this is deterministic.
+        let out = run_with_spinner(&mut terminal, &base, &theme, "Working…", async {
+            tokio::time::sleep(SPINNER_GRACE * 2).await;
+            1usize
+        })
+        .await;
+        assert_eq!(out, 1);
+
+        let text = buf_text(&terminal);
+        assert!(text.contains("chat-marker"), "snapshotted chat must stay visible:\n{text}");
+        assert!(text.contains("Working"), "progress label must overlay the chat:\n{text}");
     }
 }
 
@@ -1289,10 +1345,20 @@ mod render_tests {
     #[test]
     fn render_busy_shows_label() {
         let theme = Theme::new(false);
-        let backend = TestBackend::new(60, 10);
+        let height = 10u16;
+        let backend = TestBackend::new(60, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| render_busy(f, &theme, "⠋", "Learning schema…")).unwrap();
-        assert!(buffer_text(&terminal).contains("Learning schema"), "busy modal must show its label");
+
+        // The progress line lives on the bottom row, not a centered modal.
+        let buf = terminal.backend().buffer().clone();
+        let bottom: String = (0..buf.area.width)
+            .map(|x| buf.cell((x, height - 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            bottom.contains("Learning schema"),
+            "progress line must show its label on the bottom row: {bottom:?}"
+        );
     }
 
     #[test]
