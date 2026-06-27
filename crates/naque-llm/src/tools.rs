@@ -69,6 +69,11 @@ pub fn standard_tools() -> Vec<ToolDef> {
                     "sql": {
                         "type": "string",
                         "description": "The SQL statement to run."
+                    },
+                    "byte_columns": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Names of result columns that contain raw byte counts; the UI shows a human-friendly size (e.g. 4.5 GB) beside each. Set only for true byte-count columns."
                     }
                 },
                 "required": ["sql"]
@@ -80,6 +85,16 @@ pub fn standard_tools() -> Vec<ToolDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_query_advertises_byte_columns() {
+        let tools = standard_tools();
+        let run_query = tools.iter().find(|t| t.name == "run_query").expect("run_query tool");
+        let props = run_query.input_schema.get("properties").expect("properties");
+        let bc = props.get("byte_columns").expect("byte_columns present");
+        assert_eq!(bc.get("type").and_then(|v| v.as_str()), Some("array"));
+        assert_eq!(bc.get("items").and_then(|i| i.get("type")).and_then(|v| v.as_str()), Some("string"));
+    }
 
     #[test]
     fn run_query_is_not_advertised_as_read_only() {

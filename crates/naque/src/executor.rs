@@ -22,6 +22,8 @@ pub struct QueryToolExecutor<'a> {
     pub schema: Option<SchemaModel>,
     pub approver: &'a mut dyn Approver,
     pub last_result: Option<QueryResult>,
+    /// Indices of `last_result` columns the agent tagged as byte counts.
+    pub last_byte_columns: Vec<usize>,
 }
 
 #[async_trait::async_trait]
@@ -129,10 +131,18 @@ impl QueryToolExecutor<'_> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| LlmError::Tool("run_query: missing 'sql'".to_string()))?;
 
+        let byte_column_names: Vec<String> = call
+            .input
+            .get("byte_columns")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+
         let mut db = self.db.lock().await;
         match run_gated(&mut db, self.mode, self.catastrophic_guard, sql, QueryKind::Primary, self.approver).await {
             Ok(result) => {
                 let text = format_result_text(&result);
+                self.last_byte_columns = resolve_byte_columns(&result, &byte_column_names);
                 self.last_result = Some(result);
                 Ok(text)
             },
@@ -145,6 +155,15 @@ impl QueryToolExecutor<'_> {
 /// position. Allows letters, digits, underscores, dots, and double-quotes.
 fn is_safe_identifier(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '"'))
+}
+
+/// Map agent-supplied byte-column names to their indices in `result.columns`.
+/// Names not present in the result are dropped.
+fn resolve_byte_columns(result: &QueryResult, names: &[String]) -> Vec<usize> {
+    names
+        .iter()
+        .filter_map(|name| result.columns.iter().position(|c| &c.name == name))
+        .collect()
 }
 
 /// Render a `QueryResult` to a compact text table for the agent to read.
@@ -200,6 +219,82 @@ mod tests {
         assert!(!is_safe_identifier("a b"));
     }
 
+    #[test]
+    fn resolve_byte_columns_maps_names_to_indices() {
+        let result = QueryResult {
+            columns: vec![
+                naque_db::Column {
+                    name: "name".into(),
+                    type_name: "text".into(),
+                },
+                naque_db::Column {
+                    name: "sz".into(),
+                    type_name: "bigint".into(),
+                },
+            ],
+            rows: vec![],
+            rows_affected: None,
+        };
+        assert_eq!(resolve_byte_columns(&result, &["sz".to_string()]), vec![1]);
+        assert_eq!(resolve_byte_columns(&result, &["missing".to_string()]), Vec::<usize>::new());
+    }
+
+    #[tokio::test]
+    async fn run_query_records_byte_columns() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut db = Database::connect(&url).await.unwrap();
+        db.execute("CREATE TABLE t (name TEXT, sz INTEGER)").await.unwrap();
+        db.execute("INSERT INTO t VALUES ('a', 4500000000)").await.unwrap();
+
+        let mut approver = AutoApprove;
+        let mut exec = QueryToolExecutor {
+            db: Arc::new(Mutex::new(db)),
+            mode: naque_core::PermissionMode::Wildcard,
+            catastrophic_guard: true,
+            schema: None,
+            approver: &mut approver,
+            last_result: None,
+            last_byte_columns: Vec::new(),
+        };
+
+        let call = ToolCall {
+            id: "tc".into(),
+            name: "run_query".into(),
+            input: serde_json::json!({ "sql": "SELECT name, sz FROM t", "byte_columns": ["sz"] }),
+        };
+        exec.execute(&call).await.unwrap();
+        assert_eq!(exec.last_byte_columns, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn run_query_clears_byte_columns_when_absent() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut db = Database::connect(&url).await.unwrap();
+        db.execute("CREATE TABLE t (name TEXT, sz INTEGER)").await.unwrap();
+        db.execute("INSERT INTO t VALUES ('a', 4500000000)").await.unwrap();
+
+        let mut approver = AutoApprove;
+        let mut exec = QueryToolExecutor {
+            db: Arc::new(Mutex::new(db)),
+            mode: naque_core::PermissionMode::Wildcard,
+            catastrophic_guard: true,
+            schema: None,
+            approver: &mut approver,
+            last_result: None,
+            last_byte_columns: vec![1],
+        };
+
+        let call = ToolCall {
+            id: "tc".into(),
+            name: "run_query".into(),
+            input: serde_json::json!({ "sql": "SELECT name, sz FROM t" }),
+        };
+        exec.execute(&call).await.unwrap();
+        assert!(exec.last_byte_columns.is_empty());
+    }
+
     #[tokio::test]
     async fn inspect_table_rejects_malicious_name() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -213,6 +308,7 @@ mod tests {
             schema: None,
             approver: &mut approver,
             last_result: None,
+            last_byte_columns: Vec::new(),
         };
 
         let call = ToolCall {

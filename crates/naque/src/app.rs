@@ -641,6 +641,7 @@ impl App {
             schema: self.schema.clone(),
             approver,
             last_result: None,
+            last_byte_columns: Vec::new(),
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = agent.run_turn(text, &context, &mut executor, &mut (), &cancel).await;
@@ -708,6 +709,7 @@ impl App {
                 schema,
                 approver: &mut approver,
                 last_result: None,
+                last_byte_columns: Vec::new(),
             };
             let result = agent
                 .run_turn(&input, &context, &mut executor, &mut observer, &cancel_task)
