@@ -50,6 +50,7 @@ fn after_long_help_text(color: bool) -> String {
     s.push_str(concat!(
         "\n  naque --url postgres://user@host/mydb     Connect directly by URL",
         "\n  naque myproj                              Launch the 'myproj' profile",
+        "\n  naque --profile myproj                    Launch the 'myproj' profile by flag",
         "\n  DATABASE_URL=postgres://... naque         Use the DATABASE_URL env var",
         "\n  naque myproj --mode readonly              Profile in read-only mode",
         "\n\n",
@@ -57,7 +58,7 @@ fn after_long_help_text(color: bool) -> String {
     s.push_str(&header("CONNECTION PRECEDENCE (first match wins):", color));
     s.push_str(concat!(
         "\n  1. --url",
-        "\n  2. active profile (positional arg, naque.toml `project`, or central default)",
+        "\n  2. active profile (--profile or positional arg, naque.toml `project`, or central default)",
         "\n  3. DATABASE_URL",
         "\n\n",
     ));
@@ -79,8 +80,13 @@ fn after_long_help_text(color: bool) -> String {
     after_long_help = after_long_help()
 )]
 pub struct Args {
-    /// Profile name to launch (overrides naque.toml `project` / central default).
-    pub profile: Option<String>,
+    /// Profile to launch (same as --profile), e.g. `naque myproj`.
+    #[arg(value_name = "PROFILE")]
+    pub profile_arg: Option<String>,
+
+    /// Profile to launch (overrides naque.toml `project` / central default).
+    #[arg(long = "profile", value_name = "NAME", conflicts_with = "profile_arg")]
+    pub profile_flag: Option<String>,
 
     /// Environment within the profile to connect to (prod/dev/test).
     #[arg(long)]
@@ -112,12 +118,17 @@ pub struct Args {
 }
 
 impl Args {
+    /// The selected profile name: the `--profile` flag, else the positional argument.
+    pub fn profile(&self) -> Option<&str> {
+        self.profile_flag.as_deref().or(self.profile_arg.as_deref())
+    }
+
     /// True when no connection-related argument was supplied.
     ///
     /// Used to decide whether a missing connection should be presented as
     /// friendly first-run guidance (bare launch) or as an error.
     pub fn is_bare(&self) -> bool {
-        self.profile.is_none()
+        self.profile().is_none()
             && self.url.is_none()
             && self.mode.is_none()
             && self.provider.is_none()
@@ -135,7 +146,7 @@ mod tests {
     fn full_args_parse_correctly() {
         let args = Args::try_parse_from(["naque", "prod", "--mode", "readonly", "--no-guard", "--no-color"])
             .expect("parse failed");
-        assert_eq!(args.profile.as_deref(), Some("prod"));
+        assert_eq!(args.profile(), Some("prod"));
         assert_eq!(args.mode.as_deref(), Some("readonly"));
         assert!(args.no_guard);
         assert!(args.no_color);
@@ -145,7 +156,7 @@ mod tests {
     #[test]
     fn empty_args_all_none_or_false() {
         let args = Args::try_parse_from(["naque"]).expect("parse failed");
-        assert!(args.profile.is_none());
+        assert!(args.profile().is_none());
         assert!(args.url.is_none());
         assert!(args.mode.is_none());
         assert!(!args.no_guard);
@@ -168,6 +179,7 @@ mod tests {
     #[test]
     fn not_bare_when_connection_args_present() {
         assert!(!Args::try_parse_from(["naque", "prod"]).unwrap().is_bare());
+        assert!(!Args::try_parse_from(["naque", "--profile", "x"]).unwrap().is_bare());
         assert!(!Args::try_parse_from(["naque", "--url", "postgres://x/y"]).unwrap().is_bare());
         assert!(!Args::try_parse_from(["naque", "--provider", "hf"]).unwrap().is_bare());
     }
@@ -201,8 +213,28 @@ mod tests {
     #[test]
     fn parses_env_flag() {
         let args = Args::try_parse_from(["naque", "shop", "--env", "dev"]).unwrap();
-        assert_eq!(args.profile.as_deref(), Some("shop"));
+        assert_eq!(args.profile(), Some("shop"));
         assert_eq!(args.env.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn parses_profile_flag() {
+        let args = Args::try_parse_from(["naque", "--profile", "shop"]).unwrap();
+        assert_eq!(args.profile(), Some("shop"));
+        assert_eq!(args.profile_flag.as_deref(), Some("shop"));
+        assert!(args.profile_arg.is_none());
+    }
+
+    #[test]
+    fn positional_profile_still_works() {
+        let args = Args::try_parse_from(["naque", "shop"]).unwrap();
+        assert_eq!(args.profile(), Some("shop"));
+        assert_eq!(args.profile_arg.as_deref(), Some("shop"));
+    }
+
+    #[test]
+    fn profile_flag_and_positional_conflict() {
+        assert!(Args::try_parse_from(["naque", "foo", "--profile", "bar"]).is_err());
     }
 
     #[test]

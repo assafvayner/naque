@@ -32,7 +32,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
 
     // 2. Build CLI overrides.
     let overrides = Overrides {
-        profile: args.profile.clone(),
+        profile: args.profile().map(str::to_string),
         url: args.url.clone(),
         config: NaqueConfig {
             mode: args.mode.clone(),
