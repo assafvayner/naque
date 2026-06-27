@@ -48,6 +48,9 @@ pub struct ResultTable {
     pub rows: Vec<Vec<Option<String>>>,
     /// First visible row index.
     offset: usize,
+    /// Column indices whose integer cell values are rendered with a byte-size
+    /// suffix (e.g. `4500000000 (4.5 GB)`). Display-only; exports stay raw.
+    byte_columns: Vec<usize>,
 }
 
 impl ResultTable {
@@ -57,7 +60,15 @@ impl ResultTable {
             columns,
             rows,
             offset: 0,
+            byte_columns: Vec::new(),
         }
+    }
+
+    /// Mark `cols` (column indices) as byte counts: their integer cell values
+    /// get a human-friendly size suffix when rendered.
+    pub fn with_byte_columns(mut self, cols: Vec<usize>) -> Self {
+        self.byte_columns = cols;
+        self
     }
 
     /// Advance the visible window by `page` rows, clamping so the offset never
@@ -75,6 +86,21 @@ impl ResultTable {
         self.offset = self.offset.saturating_sub(page);
     }
 
+    /// The displayed text for a cell: the raw value, plus a byte-size suffix
+    /// when `col` is a tagged byte column and the value parses as an integer
+    /// above the threshold. Used by both width math and rendering so the suffix
+    /// is always accounted for in alignment.
+    fn display_cell(&self, col: usize, value: &str) -> String {
+        if self.byte_columns.contains(&col)
+            && let Some(n) = crate::bytes::parse_byte_count(value)
+            && let Some(suffix) = crate::bytes::byte_suffix(n)
+        {
+            format!("{value}{suffix}")
+        } else {
+            value.to_string()
+        }
+    }
+
     /// Compute each column's display width: `max(header_len, max visible cell
     /// display len)`, capped at [`MAX_COL_WIDTH`]. `NULL` cells count as the
     /// width of the literal `"NULL"`.
@@ -90,7 +116,7 @@ impl ResultTable {
                     break;
                 }
                 let len = match cell {
-                    Some(v) => display_len(v),
+                    Some(v) => display_len(&self.display_cell(i, v)),
                     None => NULL_TEXT.len(),
                 };
                 widths[i] = widths[i].max(len.min(MAX_COL_WIDTH));
@@ -179,7 +205,7 @@ impl ResultTable {
                     let sep = if i == 0 { "" } else { SEP };
                     let w = widths.get(i).copied().unwrap_or(0);
                     let cell_span = match cell {
-                        Some(v) => Span::raw(pad_or_truncate(v, w)),
+                        Some(v) => Span::raw(pad_or_truncate(&self.display_cell(i, v), w)),
                         None => Span::styled(pad_or_truncate(NULL_TEXT, w), dim_style),
                     };
                     vec![Span::raw(sep), cell_span]
@@ -510,5 +536,64 @@ mod tests {
     #[test]
     fn pad_or_truncate_exact() {
         assert_eq!(pad_or_truncate("abc", 3), "abc");
+    }
+
+    // --- byte columns ---
+
+    #[test]
+    fn byte_column_appends_size_suffix_in_render() {
+        let t = ResultTable::new(
+            vec!["name".into(), "bytes".into()],
+            vec![vec![Some("events".into()), Some("4500000000".into())]],
+        )
+        .with_byte_columns(vec![1]);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        t.render(&Theme::new(false), area, &mut buf);
+        let content = buf_to_string(&buf, 60, 10);
+        assert!(content.contains("4500000000 (4.5 GB)"), "expected suffix in render: {content}");
+    }
+
+    #[test]
+    fn byte_column_width_accounts_for_suffix() {
+        // "4500000000 (4.5 GB)" is 19 display chars; header "bytes" is 5.
+        let t =
+            ResultTable::new(vec!["bytes".into()], vec![vec![Some("4500000000".into())]]).with_byte_columns(vec![0]);
+        assert_eq!(t.column_widths(), vec![19]);
+    }
+
+    #[test]
+    fn untagged_column_is_unchanged() {
+        let t = ResultTable::new(vec!["n".into()], vec![vec![Some("4500000000".into())]]);
+        assert_eq!(t.column_widths(), vec![10]);
+    }
+
+    #[test]
+    fn small_byte_value_gets_no_suffix() {
+        // 9999 is below the threshold -> raw; width is the header "bytes" (5).
+        let t = ResultTable::new(vec!["bytes".into()], vec![vec![Some("9999".into())]]).with_byte_columns(vec![0]);
+        assert_eq!(t.column_widths(), vec![5]);
+    }
+
+    #[test]
+    fn non_numeric_byte_cell_stays_raw() {
+        let t = ResultTable::new(vec!["bytes".into()], vec![vec![Some("n/a".into())]]).with_byte_columns(vec![0]);
+        assert_eq!(t.column_widths(), vec![5]);
+    }
+
+    #[test]
+    fn null_in_byte_column_renders_as_null_not_suffix() {
+        let t = ResultTable::new(vec!["b".into()], vec![vec![None]]).with_byte_columns(vec![0]);
+        assert_eq!(t.column_widths(), vec![4]); // "NULL" width, no suffix
+    }
+
+    #[test]
+    fn exports_stay_raw_for_byte_columns() {
+        let t =
+            ResultTable::new(vec!["bytes".into()], vec![vec![Some("4500000000".into())]]).with_byte_columns(vec![0]);
+        assert_eq!(t.to_csv(), "bytes\n4500000000\n");
+        let json = t.to_json();
+        assert!(json.contains("\"4500000000\""), "json must keep raw value: {json}");
+        assert!(!json.contains("4.5 GB"), "json must not contain suffix: {json}");
     }
 }
