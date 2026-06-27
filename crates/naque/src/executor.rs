@@ -101,6 +101,7 @@ impl QueryToolExecutor<'_> {
         match db.fetch_readonly(&sql).await {
             Ok(result) => {
                 let text = format_result_text(&result);
+                self.last_byte_columns = Vec::new();
                 self.last_result = Some(result);
                 Ok(text)
             },
@@ -293,6 +294,44 @@ mod tests {
         };
         exec.execute(&call).await.unwrap();
         assert!(exec.last_byte_columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sample_table_clears_byte_columns() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut db = Database::connect(&url).await.unwrap();
+        db.execute("CREATE TABLE t (name TEXT, sz INTEGER)").await.unwrap();
+        db.execute("INSERT INTO t VALUES ('a', 4500000000)").await.unwrap();
+
+        let mut approver = AutoApprove;
+        let mut exec = QueryToolExecutor {
+            db: Arc::new(Mutex::new(db)),
+            mode: naque_core::PermissionMode::Wildcard,
+            catastrophic_guard: true,
+            schema: None,
+            approver: &mut approver,
+            last_result: None,
+            last_byte_columns: Vec::new(),
+        };
+
+        // run_query tags a byte column...
+        let q = ToolCall {
+            id: "tc1".into(),
+            name: "run_query".into(),
+            input: serde_json::json!({ "sql": "SELECT name, sz FROM t", "byte_columns": ["sz"] }),
+        };
+        exec.execute(&q).await.unwrap();
+        assert_eq!(exec.last_byte_columns, vec![1]);
+
+        // ...then sample_table on the same/other table must clear the stale tag.
+        let s = ToolCall {
+            id: "tc2".into(),
+            name: "sample_table".into(),
+            input: serde_json::json!({ "name": "t" }),
+        };
+        exec.execute(&s).await.unwrap();
+        assert!(exec.last_byte_columns.is_empty(), "sample_table results carry no LLM byte-column determination");
     }
 
     #[tokio::test]
