@@ -75,6 +75,10 @@ pub enum ConnId {
 /// Parse a connection URL into a [`ConnId`], or `None` if it can't be parsed
 /// into a recognizable identity. The password (if any) is intentionally
 /// ignored — identity is engine + host + port + database + user.
+///
+/// Note: `url::Url::host_str()` returns IPv6 hosts in their bracketed form
+/// (e.g. `[::1]`), so a hand-authored component profile with a bracketless
+/// IPv6 `host` (`"::1"`) will not match a URL-derived id (`"[::1]"`).
 pub fn url_conn_id(url: &str) -> Option<ConnId> {
     let scheme = url.split(':').next()?;
     match scheme {
@@ -101,6 +105,9 @@ pub fn url_conn_id(url: &str) -> Option<ConnId> {
             })
         },
         "sqlite" => {
+            // Path is normalized for IDENTITY-MATCHING ONLY (lossy: the leading
+            // slash / absoluteness is not preserved); never used to open a
+            // connection.
             let path = url.strip_prefix("sqlite:")?.trim_start_matches('/');
             Some(ConnId::Sqlite { path: path.to_string() })
         },
@@ -136,6 +143,11 @@ impl ConnectionSpec {
     /// as a secret and which `/save` strips). Returns `None` if the URL can't be
     /// parsed into a usable spec. The captured spec's identity (`conn_id`) equals
     /// `url_conn_id(url)`.
+    ///
+    /// URL query parameters are NOT captured: a `?password=...`-style param in
+    /// the URL is dropped on capture (not persisted, not leaked, just not
+    /// carried into the saved spec). The sqlite path is normalized as in
+    /// [`url_conn_id`] (lossy — identity-matching only).
     ///
     /// # Security
     ///
@@ -392,5 +404,34 @@ docs = ["prod read replica"]
         assert_eq!(spec.engine, Some(ProfileEngine::Sqlite));
         assert_eq!(spec.path.as_deref(), Some("abs/path.db"));
         assert_eq!(spec.conn_id(), url_conn_id("sqlite:///abs/path.db"));
+    }
+
+    #[test]
+    fn url_conn_id_ipv6_host_kept_bracketed() {
+        let id = url_conn_id("postgres://u@[::1]:5432/db").unwrap();
+        assert_eq!(
+            id,
+            ConnId::Postgres {
+                host: "[::1]".into(),
+                port: 5432,
+                dbname: "db".into(),
+                user: "u".into(),
+            }
+        );
+        // Both forms store the bracketed host and normalize the default port.
+        assert_eq!(
+            ConnectionSpec::from_url("postgres://u@[::1]/db").unwrap().conn_id(),
+            url_conn_id("postgres://u@[::1]/db")
+        );
+    }
+
+    #[test]
+    fn from_url_no_password_when_absent() {
+        assert!(
+            ConnectionSpec::from_url("postgres://analyst@db.host/shop")
+                .unwrap()
+                .password
+                .is_none()
+        );
     }
 }

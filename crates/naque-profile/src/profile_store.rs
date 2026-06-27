@@ -54,6 +54,10 @@ impl Store {
 /// matches `url` (engine+host+port+dbname+user, password ignored). Scans
 /// profiles and their environments in deterministic (sorted) order; returns the
 /// first match as `(profile_name, env_name)`, or `None`.
+///
+/// Caveat: a hand-authored component profile with a bracketless IPv6 `host`
+/// (e.g. `"::1"`) won't match a URL whose host is bracketed (`"[::1]"`), since
+/// `url::Url::host_str()` returns the bracketed form.
 pub fn match_profile_by_url(store: &Store, url: &str) -> Option<(String, String)> {
     let target = url_conn_id(url)?;
     for name in store.list_profiles().unwrap_or_default() {
