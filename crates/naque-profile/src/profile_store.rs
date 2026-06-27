@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{ConfigError, ConnectionSpec, NaqueConfig, Store};
+use crate::{ConfigError, ConnectionSpec, NaqueConfig, Store, url_conn_id};
 
 impl Store {
     /// Names of all profiles (subdirectories of `profiles/` containing a
@@ -48,6 +48,25 @@ impl Store {
         std::fs::write(dir.join("profile.toml"), toml_str).map_err(ConfigError::io)?;
         Ok(())
     }
+}
+
+/// Find a saved directory profile + environment whose connection structurally
+/// matches `url` (engine+host+port+dbname+user, password ignored). Scans
+/// profiles and their environments in deterministic (sorted) order; returns the
+/// first match as `(profile_name, env_name)`, or `None`.
+pub fn match_profile_by_url(store: &Store, url: &str) -> Option<(String, String)> {
+    let target = url_conn_id(url)?;
+    for name in store.list_profiles().unwrap_or_default() {
+        let Ok(Some(profile)) = store.load_profile(&name) else {
+            continue;
+        };
+        for (env_name, spec) in &profile.environments {
+            if spec.conn_id().as_ref() == Some(&target) {
+                return Some((name, env_name.clone()));
+            }
+        }
+    }
+    None
 }
 
 /// A project/schema profile: shared schema + context, with one or more named
@@ -137,5 +156,35 @@ path = "/tmp/dev.db"
         assert_eq!(p.environments["prod"].password_env.as_deref(), Some("PROD_PW"));
         let back: Profile = toml::from_str(&toml::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn match_profile_by_url_matches_ignoring_password_and_default_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path());
+        let mut env = BTreeMap::new();
+        env.insert(
+            "prod".to_string(),
+            ConnectionSpec {
+                engine: Some(crate::ProfileEngine::Postgres),
+                host: Some("db.host".into()),
+                dbname: Some("shop".into()),
+                user: Some("analyst".into()),
+                ..Default::default()
+            },
+        );
+        let profile = Profile {
+            environments: env,
+            ..Default::default()
+        };
+        store.save_profile("shop", &profile).unwrap();
+
+        // Password and an explicit default port don't prevent the match.
+        assert_eq!(
+            match_profile_by_url(&store, "postgres://analyst:somepw@db.host:5432/shop"),
+            Some(("shop".to_string(), "prod".to_string()))
+        );
+        // Different database → no match.
+        assert!(match_profile_by_url(&store, "postgres://analyst@db.host/other").is_none());
     }
 }

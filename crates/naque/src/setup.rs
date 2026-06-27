@@ -47,6 +47,20 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let resolved = naque_profile::resolve(&store, &current_dir, &overrides, &SystemSecrets)
         .context("profile resolution failed")?;
 
+    // Effective active profile: an explicit selection wins; otherwise, when the
+    // connection came from DATABASE_URL (no --url, no profile), try to recognize
+    // it as a saved profile so its schema/context/config are picked up.
+    let mut matched_env: Option<String> = None;
+    let mut active_profile_name = resolved.active_profile.clone();
+    if active_profile_name.is_none()
+        && args.url.is_none()
+        && let Some(db_url) = resolved.connection_url.as_deref()
+        && let Some((p, e)) = naque_profile::match_profile_by_url(&store, db_url)
+    {
+        matched_env = Some(e);
+        active_profile_name = Some(p);
+    }
+
     // New per-profile-directory model: when the active profile exists as a
     // directory profile, take its chosen environment's connection + per-profile
     // config. Falls back to the resolved (flat/--url/DATABASE_URL) connection.
@@ -54,16 +68,34 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let mut active_connection: Option<naque_profile::ConnectionSpec> = None;
     let mut connection_url = resolved.connection_url.clone();
     let mut dir_profile_config = naque_profile::NaqueConfig::default();
-    if let Some(profile_name) = resolved.active_profile.clone()
+    if let Some(profile_name) = active_profile_name.clone()
         && let Some(profile) = store.load_profile(&profile_name)?
     {
         dir_profile_config = profile.config.clone();
-        if let Some(env) = pick_environment(&profile, args.env.as_deref()) {
+        let env_pref = matched_env.as_deref().or(args.env.as_deref());
+        if let Some(env) = pick_environment(&profile, env_pref) {
             let spec = profile.environments[&env].clone();
-            connection_url = Some(spec.resolve_url(&SystemSecrets).context("resolve environment URL")?);
+            // Matched-by-DATABASE_URL: keep DATABASE_URL as the live connection
+            // (the saved spec has no password source). Explicit selection:
+            // resolve the spec's own URL.
+            if matched_env.is_none() {
+                connection_url = Some(spec.resolve_url(&SystemSecrets).context("resolve environment URL")?);
+            }
             active_env = Some(env);
             active_connection = Some(spec);
         }
+    }
+
+    // For flat / --url / DATABASE_URL launches with no profile environment,
+    // capture the connection's structure so `/save` records real connection
+    // details (the inline password is stripped by `/save`; it is never persisted
+    // plaintext nor sent to the agent). Skipped when a profile environment
+    // already supplied one.
+    if active_connection.is_none()
+        && let Some(u) = &connection_url
+        && let Some(spec) = naque_profile::ConnectionSpec::from_url(u)
+    {
+        active_connection = Some(spec);
     }
 
     // 4. Require a connection URL. The binary renders this into friendly guidance (bare launch) or a formatted error
@@ -139,12 +171,12 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let agent = Agent::new(provider, agent_config);
 
     // 10. Profile name for the status bar.
-    let profile_name = resolved.active_profile.as_deref().unwrap_or("(none)").to_string();
+    let profile_name = active_profile_name.as_deref().unwrap_or("(none)").to_string();
 
     // 11. Construct App (schema loaded lazily via /learn).
     let mut app = App::new(db, agent, mode, profile_name, catastrophic_guard, row_cap);
-    app.set_active_profile(store.clone(), resolved.active_profile.clone(), active_env, active_connection);
-    if let Some(p) = &resolved.active_profile {
+    app.set_active_profile(store.clone(), active_profile_name.clone(), active_env, active_connection);
+    if let Some(p) = &active_profile_name {
         if let Ok(Some(model)) = naque_schema::load_schema(&store.profile_dir(p)) {
             app.set_schema(model);
         }
