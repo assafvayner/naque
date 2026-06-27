@@ -682,10 +682,10 @@ async fn dispatch_line<B: ratatui::backend::Backend>(
             }
         },
         Input::DbCommand(cmd) => {
-            let label = if cmd.trim() == "reset" {
-                "Reconnecting…"
-            } else {
-                "Working…"
+            let label = match cmd.trim() {
+                "reset" => "Reconnecting…",
+                "dt" => "Loading tables…",
+                _ => "Working…",
             };
             let fut = app.handle_db_command(&cmd);
             let _ = run_with_spinner(terminal, theme, label, fut).await;
@@ -840,8 +840,19 @@ async fn handle_profile_command<B: ratatui::backend::Backend>(
     let Some(ei) = run_picker(terminal, theme, "environment", envs.clone()) else {
         return;
     };
-    let env = envs[ei].clone();
-    let fut = app.switch_to(&profile, &env);
+    connect_to(app, theme, terminal, &profile, &envs[ei]).await;
+}
+
+/// Connect to `profile`/`env` with a progress spinner, recording an info line on
+/// failure. Shared by the `/profile` and `/env` interactive flows.
+async fn connect_to<B: ratatui::backend::Backend>(
+    app: &mut App,
+    theme: &Theme,
+    terminal: &mut Terminal<B>,
+    profile: &str,
+    env: &str,
+) {
+    let fut = app.switch_to(profile, env);
     if let Err(e) = run_with_spinner(terminal, theme, &format!("Connecting to {profile}/{env}…"), fut).await {
         app.push_info(format!("switch failed: {e}"));
     }
@@ -862,11 +873,7 @@ async fn handle_env_command<B: ratatui::backend::Backend>(app: &mut App, theme: 
     let Some(ei) = run_picker(terminal, theme, "environment", envs.clone()) else {
         return;
     };
-    let env = envs[ei].clone();
-    let fut = app.switch_to(&profile, &env);
-    if let Err(e) = run_with_spinner(terminal, theme, &format!("Connecting to {profile}/{env}…"), fut).await {
-        app.push_info(format!("switch failed: {e}"));
-    }
+    connect_to(app, theme, terminal, &profile, &envs[ei]).await;
 }
 
 const SPINNER_GRACE: Duration = Duration::from_millis(120);
@@ -1171,6 +1178,20 @@ mod tests {
         let out = run_with_spinner(&mut terminal, &theme, "Working…", async { 42usize }).await;
         assert_eq!(out, 42);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_with_spinner_skips_draw_within_grace_period() {
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // A future that finishes before the grace period must never draw the
+        // modal. With a paused clock the grace timer never fires for an
+        // already-ready future, so the buffer stays blank.
+        let out = run_with_spinner(&mut terminal, &theme, "Learning schema…", async { 7usize }).await;
+        assert_eq!(out, 7);
+        assert!(!buf_text(&terminal).contains("Learning schema"), "fast op must not flash the busy modal");
+    }
 }
 
 #[cfg(test)]
@@ -1272,6 +1293,14 @@ mod render_tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| render_busy(f, &theme, "⠋", "Learning schema…")).unwrap();
         assert!(buffer_text(&terminal).contains("Learning schema"), "busy modal must show its label");
+    }
+
+    #[test]
+    fn render_busy_handles_one_by_one() {
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(1, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_busy(f, &theme, "⠋", "Learning schema…")).unwrap();
     }
 
     #[test]
