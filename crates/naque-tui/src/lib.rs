@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod approval;
+pub mod bytes;
 pub mod commands;
 pub mod history;
 pub mod input;
