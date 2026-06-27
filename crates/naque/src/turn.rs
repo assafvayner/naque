@@ -28,6 +28,8 @@ pub struct TurnOutput {
     pub agent: Agent,
     pub result: Result<TurnResult, LlmError>,
     pub last_result: Option<QueryResult>,
+    /// Indices of `last_result` columns the agent tagged as byte counts.
+    pub last_byte_columns: Vec<usize>,
 }
 
 /// Handle to an in-flight spawned turn.

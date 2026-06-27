@@ -352,6 +352,8 @@ pub struct App {
     pub(crate) usage: Usage,
     pub(crate) row_cap: usize,
     pub(crate) last_result: Option<QueryResult>,
+    /// Indices of `last_result` columns to render with a byte-size suffix.
+    pub(crate) last_byte_columns: Vec<usize>,
     pub(crate) transcript: Vec<TranscriptEntry>,
     pub(crate) should_quit: bool,
     pub(crate) max_iterations: u32,
@@ -391,6 +393,7 @@ impl App {
             usage: Usage::default(),
             row_cap,
             last_result: None,
+            last_byte_columns: Vec::new(),
             transcript: Vec::new(),
             should_quit: false,
             max_iterations,
@@ -416,6 +419,10 @@ impl App {
 
     pub fn last_result(&self) -> Option<&QueryResult> {
         self.last_result.as_ref()
+    }
+
+    pub fn last_byte_columns(&self) -> &[usize] {
+        &self.last_byte_columns
     }
 
     pub fn transcript(&self) -> &[TranscriptEntry] {
@@ -591,6 +598,7 @@ impl App {
                 }
 
                 self.last_result = Some(capped);
+                self.last_byte_columns = Vec::new();
                 self.transcript.push(TranscriptEntry::Sql {
                     sql: sql.to_string(),
                     label,
@@ -646,6 +654,7 @@ impl App {
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = agent.run_turn(text, &context, &mut executor, &mut (), &cancel).await;
         let exec_last = executor.last_result.take();
+        let exec_byte_cols = std::mem::take(&mut executor.last_byte_columns);
         self.agent_slot = Some(agent);
 
         let turn = result?;
@@ -656,6 +665,7 @@ impl App {
                 capped.rows.truncate(self.row_cap);
             }
             self.last_result = Some(capped);
+            self.last_byte_columns = exec_byte_cols;
         }
         self.transcript.push(TranscriptEntry::Agent(turn.answer));
         Ok(())
@@ -715,10 +725,12 @@ impl App {
                 .run_turn(&input, &context, &mut executor, &mut observer, &cancel_task)
                 .await;
             let last_result = executor.last_result.take();
+            let last_byte_columns = std::mem::take(&mut executor.last_byte_columns);
             crate::turn::TurnOutput {
                 agent,
                 result,
                 last_result,
+                last_byte_columns,
             }
         });
 
@@ -790,6 +802,7 @@ impl App {
                         capped.rows.truncate(self.row_cap);
                     }
                     self.last_result = Some(capped);
+                    self.last_byte_columns = out.last_byte_columns;
                 }
                 match out.result {
                     Ok(turn) => {
@@ -838,6 +851,7 @@ impl App {
                     rows,
                     rows_affected: None,
                 });
+                self.last_byte_columns = Vec::new();
             } else {
                 // Live introspect.
                 let mut db = self.db.lock().await;
@@ -853,6 +867,7 @@ impl App {
                         let text = format_result_text(&result);
                         self.transcript.push(TranscriptEntry::Info(text));
                         self.last_result = Some(result);
+                        self.last_byte_columns = Vec::new();
                     },
                     Err(e) => {
                         self.transcript.push(TranscriptEntry::Error(e.to_string()));
@@ -1471,6 +1486,53 @@ pub mod tests {
         assert!(app.usage().input_tokens > 0, "cumulative usage should be > 0");
     }
 
+    #[tokio::test]
+    async fn agent_turn_propagates_byte_columns() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+
+        // Set up a table with a byte-count column and one row.
+        let mut setup = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        setup
+            .handle_line("!CREATE TABLE t(id INTEGER, sz INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        setup
+            .handle_line("!INSERT INTO t VALUES (1, 4500000000)", &mut AutoApprove)
+            .await
+            .unwrap();
+        drop(setup);
+
+        // Agent fires run_query tagging `sz` as a byte column, then answers.
+        let resp1 = LlmResponse {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "tc1".to_string(),
+                name: "run_query".to_string(),
+                input: serde_json::json!({ "sql": "SELECT id, sz FROM t", "byte_columns": ["sz"] }),
+            }],
+            usage: LlmUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            stop_reason: "tool_use".to_string(),
+        };
+        let resp2 = LlmResponse {
+            text: Some("done".to_string()),
+            tool_calls: vec![],
+            usage: LlmUsage {
+                input_tokens: 8,
+                output_tokens: 3,
+            },
+            stop_reason: "end_turn".to_string(),
+        };
+
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![resp1, resp2]).await;
+        app.handle_natural_language("show t sizes", &mut AutoApprove).await.unwrap();
+
+        assert_eq!(app.last_byte_columns(), &[1], "agent-tagged byte column 'sz' (index 1) must propagate to the app");
+    }
+
     // ------------------------------------------------------------------
     // Test 6: tool commands and mode switching
     // ------------------------------------------------------------------
@@ -1896,6 +1958,26 @@ pub mod tests {
         let toml_text = std::fs::read_to_string(store.profile_dir("shop").join("profile.toml")).unwrap();
         assert!(!toml_text.contains("PARAM_SECRET"), "password param must be stripped: {toml_text}");
         assert!(toml_text.contains("sslmode"), "non-secret params preserved");
+    }
+
+    #[tokio::test]
+    async fn raw_sql_clears_byte_columns() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("!INSERT INTO t VALUES (1)", &mut AutoApprove).await.unwrap();
+
+        // Simulate a stale byte-column tag from a prior agent turn.
+        app.last_byte_columns = vec![0];
+
+        app.handle_line("!SELECT * FROM t", &mut AutoApprove).await.unwrap();
+
+        assert!(
+            app.last_byte_columns().is_empty(),
+            "raw SQL results carry no LLM byte-column determination and must clear stale tags"
+        );
     }
 }
 

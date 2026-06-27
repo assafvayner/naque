@@ -109,7 +109,8 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pe
 
     // ---- Result table -------------------------------------------------------
     if let (Some(result), true) = (app.last_result(), has_result) {
-        let table = ResultTable::new(result.columns.iter().map(|c| c.name.clone()).collect(), result.rows.clone());
+        let table = ResultTable::new(result.columns.iter().map(|c| c.name.clone()).collect(), result.rows.clone())
+            .with_byte_columns(app.last_byte_columns().to_vec());
         let buf = frame.buffer_mut();
         table.render(theme, chunks[1], buf);
     }
