@@ -21,6 +21,10 @@ A compact schema catalog is appended to each user message — consult it before 
 deciding which tables or columns exist. \
 Write correct SQL for the target engine. Prefer read-only exploration. \
 After running a query, reply with a concise natural-language answer. \
+When a number in your prose is a count of bytes, wrap the raw integer in \
+<bytes>N</bytes> so the UI can show a human-friendly size beside it. \
+When calling run_query, set byte_columns to the names of any result columns \
+whose values are raw byte counts. \
 Do not over-plan; act directly on the user's question.";
 
 /// Build an [`App`] and [`Theme`] from the parsed CLI arguments.
