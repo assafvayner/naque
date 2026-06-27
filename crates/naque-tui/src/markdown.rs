@@ -77,6 +77,28 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {
     let mut i = 0;
 
     while i < chars.len() {
+        // Byte tag: <bytes>...</bytes> -> inner text verbatim + size suffix.
+        if chars[i] == '<' {
+            let open = ['<', 'b', 'y', 't', 'e', 's', '>'];
+            let close = ['<', '/', 'b', 'y', 't', 'e', 's', '>'];
+            if chars[i..].starts_with(&open) {
+                let inner_start = i + open.len();
+                if let Some(rel) = find_char_subslice(&chars[inner_start..], &close) {
+                    let inner: String = chars[inner_start..inner_start + rel].iter().collect();
+                    flush(&mut buf, &mut spans, base);
+                    let rendered = match crate::bytes::parse_byte_count(&inner) {
+                        Some(n) => match crate::bytes::byte_suffix(n) {
+                            Some(suffix) => format!("{inner}{suffix}"),
+                            None => inner,
+                        },
+                        None => inner,
+                    };
+                    spans.push(Span::styled(rendered, base));
+                    i = inner_start + rel + close.len();
+                    continue;
+                }
+            }
+        }
         // Inline code: `...`
         if chars[i] == '`'
             && let Some(close) = (i + 1..chars.len()).find(|&j| chars[j] == '`')
@@ -112,6 +134,15 @@ fn flush(buf: &mut String, spans: &mut Vec<Span<'static>>, style: Style) {
     if !buf.is_empty() {
         spans.push(Span::styled(std::mem::take(buf), style));
     }
+}
+
+/// Index of the first occurrence of `needle` within `haystack` (char slices),
+/// or `None`. An empty `needle` returns `None` (callers must not pass one).
+fn find_char_subslice(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| haystack[i..i + needle.len()] == *needle)
 }
 
 #[cfg(test)]
@@ -186,6 +217,59 @@ mod tests {
     fn empty_input_yields_one_empty_line() {
         let lines = render_markdown("", &theme());
         assert_eq!(lines.len(), 1);
+        assert_eq!(plain(&lines[0]), "");
+    }
+
+    #[test]
+    fn bytes_tag_expands_with_suffix() {
+        let lines = render_markdown("size is <bytes>4500000000</bytes> total", &theme());
+        assert_eq!(plain(&lines[0]), "size is 4500000000 (4.5 GB) total");
+    }
+
+    #[test]
+    fn bytes_tag_below_threshold_has_no_suffix() {
+        let lines = render_markdown("only <bytes>9999</bytes> bytes", &theme());
+        assert_eq!(plain(&lines[0]), "only 9999 bytes");
+    }
+
+    #[test]
+    fn bytes_tag_with_commas_prints_inner_verbatim() {
+        let lines = render_markdown("<bytes>4,500,000,000</bytes>", &theme());
+        assert_eq!(plain(&lines[0]), "4,500,000,000 (4.5 GB)");
+    }
+
+    #[test]
+    fn unterminated_bytes_tag_renders_verbatim() {
+        let lines = render_markdown("a <bytes>123 b", &theme());
+        assert_eq!(plain(&lines[0]), "a <bytes>123 b");
+    }
+
+    #[test]
+    fn non_numeric_bytes_tag_renders_inner_only() {
+        let lines = render_markdown("<bytes>lots</bytes>", &theme());
+        assert_eq!(plain(&lines[0]), "lots");
+    }
+
+    #[test]
+    fn bytes_tag_inside_code_block_not_expanded() {
+        let md = "```\n<bytes>4500000000</bytes>\n```";
+        let lines = render_markdown(md, &theme());
+        let texts: Vec<String> = lines.iter().map(plain).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("<bytes>4500000000</bytes>")),
+            "code block must stay verbatim: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn two_bytes_tags_on_one_line_both_expand() {
+        let lines = render_markdown("<bytes>1000000</bytes> and <bytes>2000000</bytes>", &theme());
+        assert_eq!(plain(&lines[0]), "1000000 (1.0 MB) and 2000000 (2.0 MB)");
+    }
+
+    #[test]
+    fn empty_bytes_tag_renders_empty() {
+        let lines = render_markdown("<bytes></bytes>", &theme());
         assert_eq!(plain(&lines[0]), "");
     }
 }
