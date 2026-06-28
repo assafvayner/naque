@@ -322,6 +322,7 @@ fn render_all_mode_status_bars() -> String {
     for (i, mode) in modes.iter().enumerate() {
         let bar = StatusBar {
             profile: "prod-analytics".to_string(),
+            env: Some("prod".to_string()),
             mode: *mode,
             in_transaction: false,
             tokens: 134,

@@ -142,6 +142,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pe
 
         let bar = StatusBar {
             profile: app.profile_name.clone(),
+            env: app.active_env.clone(),
             mode: app.mode(),
             in_transaction: false,
             tokens,
@@ -1065,6 +1066,7 @@ fn render_edit(frame: &mut Frame, app: &App, theme: &Theme, edit_buf: &str) {
     {
         let bar = StatusBar {
             profile: app.profile_name.clone(),
+            env: app.active_env.clone(),
             mode: app.mode(),
             in_transaction: false,
             tokens: app.usage().input_tokens + app.usage().output_tokens,
