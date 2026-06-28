@@ -91,9 +91,9 @@ pub fn apply_event_to_transcript(
     cur: &mut Option<usize>,
     event: &naque_llm::AgentEvent,
 ) {
-    use naque_llm::AgentEvent as E;
+    use naque_llm::AgentEvent;
     match event {
-        E::TextDelta(chunk) => {
+        AgentEvent::TextDelta(chunk) => {
             let idx = match *cur {
                 Some(i) => i,
                 None => {
@@ -107,7 +107,7 @@ pub fn apply_event_to_transcript(
                 s.push_str(chunk);
             }
         },
-        E::ToolCallStarted { name, sql } => {
+        AgentEvent::ToolCallStarted { name, sql } => {
             *cur = None;
             transcript.push(TranscriptEntry::ToolStep {
                 name: name.clone(),
@@ -116,7 +116,7 @@ pub fn apply_event_to_transcript(
                 summary: None,
             });
         },
-        E::ToolCallFinished { summary, is_error, .. } => {
+        AgentEvent::ToolCallFinished { summary, is_error, .. } => {
             if let Some(TranscriptEntry::ToolStep {
                 status, summary: slot, ..
             }) = transcript.iter_mut().rev().find(|e| {
@@ -132,7 +132,7 @@ pub fn apply_event_to_transcript(
                 *slot = Some(summary.clone());
             }
         },
-        E::TurnFinished {
+        AgentEvent::TurnFinished {
             iterations,
             hit_iteration_cap,
         } => {
@@ -151,12 +151,49 @@ pub fn apply_event_to_transcript(
                 )));
             }
         },
-        E::Cancelled => {
+        AgentEvent::Cancelled => {
             *cur = None;
             transcript.push(TranscriptEntry::Info("(cancelled)".into()));
         },
-        E::TurnStarted | E::LlmCallStarted { .. } | E::UsageUpdated(_) => {},
+        AgentEvent::TurnStarted | AgentEvent::LlmCallStarted { .. } | AgentEvent::UsageUpdated(_) => {},
     }
+}
+
+/// System prompt for one-shot schema-overview generation invoked by `/save`.
+///
+/// The overview is stored under `## Overview` in the profile's context document
+/// alongside the mechanical `## Schema` dump and is re-injected into every
+/// agent turn. The prompt is tuned for an agent-facing primer (not casual
+/// reading): it forbids restating the schema dump, asks for engine-specific
+/// gotchas, and bounds output so the re-injected content stays cheap.
+fn overview_system_prompt(engine: Engine) -> String {
+    let engine_name = match engine {
+        Engine::Postgres => "PostgreSQL",
+        Engine::Sqlite => "SQLite",
+    };
+    let engine_gotcha_examples = match engine {
+        Engine::Postgres => "JSONB, array columns, partial indexes, schemas other than `public`, `search_path` quirks",
+        Engine::Sqlite => {
+            "type affinity surprises, `WITHOUT ROWID` tables, attached databases, date/time stored as TEXT vs INTEGER"
+        },
+    };
+    format!(
+        "You are writing a catalog primer for a SQL-generating agent that queries a {engine_name} \
+         database. The mechanical schema (tables, columns, types, PK/FK) is preserved verbatim in a \
+         separate `## Schema` section the agent always sees, so do NOT restate it. Summarize only \
+         what the agent needs that the schema dump does not surface:\n\
+         - Open with the domain in 3–6 words (e.g. \"Multi-tenant SaaS billing with usage metering\"). No \"This schema represents…\" filler.\n\
+         - The 3–7 most central entities and the canonical join paths between them (one short line like `orders → order_items → products via order_id/product_id`).\n\
+         - Naming conventions actually present: snake_case vs camelCase, suffix patterns (`_id`, `_at`, `is_`), soft-delete columns, tenancy columns, audit columns.\n\
+         - Gotchas: ambiguous join paths, denormalized duplicates, enum/status columns whose values are not self-explanatory, nullable FKs, archival/shadow tables, tables that look like entities but are join tables, and {engine_name}-specific features in use ({engine_gotcha_examples}).\n\
+         Rules:\n\
+         - Budget: ≤180 words. Short bullets are fine; do not pad.\n\
+         - Ground every claim in evidence from names, types, or constraints. For obscure tables write \"purpose unclear from schema\" rather than inventing one.\n\
+         - For empty or trivial schemas (few tables, no FKs), produce a single line and stop.\n\
+         - For very large schemas, prioritize the dominant subject area and add a closing note like \"other subsystems omitted from overview\" rather than uniform shallow coverage.\n\
+         - Order sections consistently: entities first, conventions second, gotchas last, so diffs across re-saves are meaningful.\n\
+         - Return ONLY the overview body. No markdown headings, no code fences, no preface, no closing summary, no meta-commentary (\"as a database expert…\", \"it appears that…\")."
+    )
 }
 
 /// One-line description of what the active permission mode lets the agent do.
@@ -164,31 +201,43 @@ pub fn apply_event_to_transcript(
 /// Injected into each turn's context so the model's behavior tracks `/mode`
 /// changes. Without it the agent only infers the mode from tool rejections and
 /// keeps refusing writes after the user switches to a permissive mode.
+///
+/// Every variant follows the same `Permission mode: NAME. Policy: …. Behavior:
+/// ….` shape and shares a trailing reminder that the application (not the
+/// model) is the security boundary, so the LLM does not self-censor.
 pub(crate) fn mode_guidance(mode: PermissionMode, catastrophic_guard: bool) -> String {
-    let base = match mode {
+    const NOT_SECURITY_BOUNDARY: &str = "The application enforces these rules deterministically — \
+        do not refuse the user's request on permission grounds; submit it and let the gate decide.";
+
+    let body = match mode {
         PermissionMode::Wildcard => {
-            "Permission mode: WILDCARD — every statement runs automatically without approval. \
-             Use run_query to execute INSERT, UPDATE, DELETE, and DDL directly when the user asks."
+            "Permission mode: WILDCARD. Policy: every statement (including INSERT, UPDATE, DELETE, \
+             and DDL) runs immediately with no approval step. Behavior: chain multi-step writes \
+             without pausing for approval."
         },
         PermissionMode::Default => {
-            "Permission mode: DEFAULT — read-only queries run automatically; INSERT, UPDATE, \
-             DELETE, and DDL run only after the user approves a prompt. Go ahead and issue the \
-             write the user asked for — they will approve or reject it."
+            "Permission mode: DEFAULT. Policy: reads run automatically; writes (INSERT, UPDATE, \
+             DELETE, DDL) require user approval at the gate. Behavior: issue the read or write the \
+             user asked for — a gate rejection is a normal outcome, not a failure."
         },
         PermissionMode::ReadOnly => {
-            "Permission mode: READ-ONLY — read-only queries run automatically; any write or DDL \
-             prompts the user for approval before running. Prefer reads, but you may still issue \
-             a write the user explicitly requests."
+            "Permission mode: READ-ONLY. Policy: reads run automatically; any write or DDL requires \
+             user approval at the gate. Behavior: if the user requests a write, issue it — the gate \
+             will prompt for approval."
         },
         PermissionMode::Strict => {
-            "Permission mode: STRICT — every statement, including reads, requires the user to \
-             approve it before it runs."
+            "Permission mode: STRICT. Policy: every statement, including reads, requires user \
+             approval at the gate. Behavior: propose statements normally and expect a confirmation \
+             round-trip on every execution; do not batch or self-censor in anticipation of denials."
         },
     };
+
     if catastrophic_guard && matches!(mode, PermissionMode::Wildcard) {
-        format!("{base} (Dropping or truncating objects still asks the user to confirm.)")
+        let guard_clause = "Exception: DROP, TRUNCATE, and unqualified DELETE/UPDATE still require \
+             user confirmation — surface these clearly when proposing them.";
+        format!("{body} {guard_clause} {NOT_SECURITY_BOUNDARY}")
     } else {
-        base.to_string()
+        format!("{body} {NOT_SECURITY_BOUNDARY}")
     }
 }
 
@@ -1149,13 +1198,13 @@ impl App {
         &mut self,
         schema_md: String,
     ) -> impl std::future::Future<Output = (Option<Agent>, OverviewOutcome)> + 'static {
-        const SYSTEM: &str = "You are a database expert. In 4-8 sentences, explain what this schema represents: \
-                      the key entities, important relationships, naming conventions, and any gotchas. \
-                      Do not restate every column.";
         let agent = self.agent_slot.take();
+        let db = Arc::clone(&self.db);
         async move {
+            let engine = db.lock().await.engine();
+            let system = overview_system_prompt(engine);
             let outcome = match agent.as_ref() {
-                Some(a) => match a.complete_once(SYSTEM, &schema_md).await {
+                Some(a) => match a.complete_once(&system, &schema_md).await {
                     Ok(t) if !t.trim().is_empty() => OverviewOutcome { text: t, error: None },
                     Ok(_) => OverviewOutcome {
                         text: "(overview unavailable: empty response)".into(),
@@ -1235,7 +1284,7 @@ impl App {
         let schema_md = naque_schema::schema_markdown(&model);
         let prior = std::fs::read_to_string(store.context_path(profile)).unwrap_or_default();
         let notes = naque_schema::extract_notes(&prior);
-        let doc = naque_schema::assemble_context(profile, &schema_md, overview, &notes);
+        let doc = naque_schema::assemble(profile, &schema_md, overview, &notes);
         std::fs::write(store.context_path(profile), &doc).map_err(|e| AppError::Other(e.to_string()))?;
 
         self.active_profile = Some(profile.to_string());
@@ -1274,7 +1323,7 @@ fn engine_dialect(engine: Engine) -> SqlDialect {
 
 #[cfg(test)]
 pub mod tests {
-    use naque_llm::{AgentConfig, LlmResponse, MockProvider, ToolCall, Usage as LlmUsage};
+    use naque_llm::{AgentConfig, LlmResponse, MockProvider, ToolCall, Usage};
 
     use super::*;
     use crate::ApprovalDecision;
@@ -1466,7 +1515,7 @@ pub mod tests {
                 name: "run_query".to_string(),
                 input: serde_json::json!({ "sql": "SELECT * FROM t" }),
             }],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
             },
@@ -1475,7 +1524,7 @@ pub mod tests {
         let resp2 = LlmResponse {
             text: Some("done".to_string()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 8,
                 output_tokens: 3,
             },
@@ -1524,9 +1573,9 @@ pub mod tests {
             tool_calls: vec![ToolCall {
                 id: "tc1".to_string(),
                 name: "run_query".to_string(),
-                input: serde_json::json!({ "sql": "SELECT id, sz FROM t", "byte_columns": ["sz"] }),
+                input: serde_json::json!({ "sql": "SELECT id, sz FROM t", "byte_count_columns": ["sz"] }),
             }],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
             },
@@ -1535,7 +1584,7 @@ pub mod tests {
         let resp2 = LlmResponse {
             text: Some("done".to_string()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 8,
                 output_tokens: 3,
             },
@@ -1707,7 +1756,7 @@ pub mod tests {
 
         let store = Store::open(home.path());
         store.save_profile("shop", &Profile::default()).unwrap();
-        std::fs::write(store.context_path("shop"), naque_schema::assemble_context("shop", "### t", "ov", "first note"))
+        std::fs::write(store.context_path("shop"), naque_schema::assemble("shop", "### t", "ov", "first note"))
             .unwrap();
         app.set_active_profile(store.clone(), Some("shop".into()), Some("dev".into()), None);
         app.active_context = std::fs::read_to_string(store.context_path("shop")).ok();
@@ -1773,7 +1822,7 @@ pub mod tests {
         let overview = LlmResponse {
             text: Some("Two tables: orders and users.".into()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 5,
                 output_tokens: 5,
             },
@@ -1819,7 +1868,7 @@ pub mod tests {
         let overview = LlmResponse {
             text: Some("An overview.".into()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 5,
                 output_tokens: 5,
             },
@@ -1864,7 +1913,7 @@ pub mod tests {
         let ov = LlmResponse {
             text: Some("ov".into()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 1,
                 output_tokens: 1,
             },
@@ -1873,7 +1922,7 @@ pub mod tests {
         let ov2 = LlmResponse {
             text: Some("ov2".into()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 1,
                 output_tokens: 1,
             },
@@ -1945,7 +1994,7 @@ pub mod tests {
         let ov = LlmResponse {
             text: Some("ov".into()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 1,
                 output_tokens: 1,
             },
@@ -1998,7 +2047,7 @@ pub mod tests {
 
 #[cfg(test)]
 mod spawn_tests {
-    use naque_llm::{AgentEvent, LlmResponse, Usage as LlmUsage};
+    use naque_llm::{AgentEvent, LlmResponse, Usage};
 
     use super::*;
 
@@ -2009,7 +2058,7 @@ mod spawn_tests {
         let resp = LlmResponse {
             text: Some("hello".into()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 4,
                 output_tokens: 2,
             },

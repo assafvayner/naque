@@ -2,7 +2,7 @@
 
 use sqlx::postgres::PgConnection;
 use sqlx::sqlite::SqliteConnection;
-use sqlx::{Column as _, Executor, Row, TypeInfo, ValueRef};
+use sqlx::{Executor, Row, TypeInfo, ValueRef};
 
 use crate::error::DbError;
 use crate::result::{Column, QueryResult};
@@ -42,7 +42,6 @@ impl Conn {
 // ---------------------------------------------------------------------------
 
 async fn fetch_pg(conn: &mut PgConnection, sql: &str) -> Result<QueryResult, DbError> {
-    use sqlx::Row as _;
     use sqlx::postgres::PgRow;
 
     let rows: Vec<PgRow> = sqlx::query(sql)
@@ -58,8 +57,8 @@ async fn fetch_pg(conn: &mut PgConnection, sql: &str) -> Result<QueryResult, DbE
         .columns()
         .iter()
         .map(|c| Column {
-            name: c.name().to_string(),
-            type_name: c.type_info().name().to_string(),
+            name: sqlx::Column::name(c).to_string(),
+            type_name: sqlx::Column::type_info(c).name().to_string(),
         })
         .collect();
 
@@ -81,8 +80,6 @@ async fn fetch_pg(conn: &mut PgConnection, sql: &str) -> Result<QueryResult, DbE
 }
 
 fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Option<String> {
-    use sqlx::Row as _;
-
     // Check for NULL via raw value.
     let raw = match row.try_get_raw(i) {
         Ok(r) => r,
@@ -286,8 +283,6 @@ fn decode_pg_cell(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> Opt
 /// lowercased, no `[]`). Falls back to a placeholder for element types we don't
 /// render (composite, geometric, multi-dim, etc.).
 fn decode_pg_array(row: &sqlx::postgres::PgRow, i: usize, elem: &str) -> Option<String> {
-    use sqlx::Row as _;
-
     macro_rules! try_arr {
         ($t:ty) => {{
             if let Ok(v) = row.try_get::<Vec<Option<$t>>, _>(i) {
@@ -360,8 +355,8 @@ async fn fetch_sqlite(conn: &mut SqliteConnection, sql: &str) -> Result<QueryRes
         .columns()
         .iter()
         .map(|c| Column {
-            name: c.name().to_string(),
-            type_name: c.type_info().name().to_string(),
+            name: sqlx::Column::name(c).to_string(),
+            type_name: sqlx::Column::type_info(c).name().to_string(),
         })
         .collect();
 
@@ -383,8 +378,6 @@ async fn fetch_sqlite(conn: &mut SqliteConnection, sql: &str) -> Result<QueryRes
 
 /// SQLite is dynamically typed; try the most common decode orders.
 fn decode_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> Option<String> {
-    use sqlx::Row as _;
-
     let raw = match row.try_get_raw(i) {
         Ok(r) => r,
         Err(_) => return Some("<unrenderable:RAW_ERROR>".to_string()),

@@ -134,7 +134,7 @@ impl QueryToolExecutor<'_> {
 
         let byte_column_names: Vec<String> = call
             .input
-            .get("byte_columns")
+            .get("byte_count_columns")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
             .unwrap_or_default();
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_query_records_byte_columns() {
+    async fn run_query_records_byte_count_columns() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let url = format!("sqlite:{}", tmp.path().display());
         let mut db = Database::connect(&url).await.unwrap();
@@ -262,7 +262,7 @@ mod tests {
         let call = ToolCall {
             id: "tc".into(),
             name: "run_query".into(),
-            input: serde_json::json!({ "sql": "SELECT name, sz FROM t", "byte_columns": ["sz"] }),
+            input: serde_json::json!({ "sql": "SELECT name, sz FROM t", "byte_count_columns": ["sz"] }),
         };
         exec.execute(&call).await.unwrap();
         assert_eq!(exec.last_byte_columns, vec![1]);
@@ -319,7 +319,7 @@ mod tests {
         let q = ToolCall {
             id: "tc1".into(),
             name: "run_query".into(),
-            input: serde_json::json!({ "sql": "SELECT name, sz FROM t", "byte_columns": ["sz"] }),
+            input: serde_json::json!({ "sql": "SELECT name, sz FROM t", "byte_count_columns": ["sz"] }),
         };
         exec.execute(&q).await.unwrap();
         assert_eq!(exec.last_byte_columns, vec![1]);

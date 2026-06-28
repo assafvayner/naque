@@ -10,13 +10,24 @@ pub fn standard_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "inspect_table".to_string(),
-            description: "Return the column names, types, and row count for a table.".to_string(),
+            description: "Return the full schema for one table: columns (with types and nullability), \
+                          defaults, primary key, foreign keys, indexes, and the row count. The row count \
+                          may be an estimate (PostgreSQL: pg_class.reltuples; SQLite: sqlite_stat1) and \
+                          can be stale on large tables. Accepts a bare or schema-qualified name (e.g. \
+                          'orders' or 'public.orders'); spell the identifier exactly as it appears in \
+                          the catalog (PostgreSQL folds unquoted identifiers to lowercase). Errors when \
+                          the name is missing, ambiguous across schemas, refers to a view/materialized \
+                          view, or the connection lacks privilege to read it. \
+                          Prefer this over issuing your own queries against information_schema or \
+                          sqlite_master; call it only when you need detail the appended schema catalog \
+                          does not already provide."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "The table name to inspect."
+                        "description": "Bare or schema-qualified table name, matching the catalog's exact spelling and case."
                     }
                 },
                 "required": ["name"]
@@ -24,18 +35,27 @@ pub fn standard_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "sample_table".to_string(),
-            description: "Return up to `limit` rows from a table as formatted text.".to_string(),
+            description: "Return up to `limit` arbitrary rows from a table as a human-readable text \
+                          table (for the agent's own orientation — not intended for verbatim display \
+                          to the user). Row order is unordered and not a statistical sample. All \
+                          columns are returned; wide text/JSON/BLOB/bytea cells may be truncated. \
+                          Sampling is always read-only and never triggers an approval prompt. \
+                          Use to disambiguate enum-like columns, inspect free-text formats, or see \
+                          real values before writing filters. For specific projections, joins, or \
+                          filters, use `run_query` with `SELECT ... LIMIT` instead."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "The table name to sample."
+                        "description": "Bare or schema-qualified table name, matching the catalog's exact spelling and case."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of rows to return.",
-                        "default": 10
+                        "description": "Maximum rows to return. Defaults to 10; clamped to a small upper bound. Use a small value (≤10) for orientation.",
+                        "default": 10,
+                        "minimum": 1
                     }
                 },
                 "required": ["name"]
@@ -43,13 +63,22 @@ pub fn standard_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "explain".to_string(),
-            description: "Run EXPLAIN on a SQL statement and return the query plan.".to_string(),
+            description: "Return the query plan for a single SQL statement WITHOUT executing it \
+                          (PostgreSQL: `EXPLAIN`; SQLite: `EXPLAIN QUERY PLAN`). Safe to call on \
+                          writes and DDL — no side effects, no real timings (this is not \
+                          `EXPLAIN ANALYZE`). The two engines produce very different output shapes \
+                          (PostgreSQL: a planner tree with cost estimates; SQLite: a flat list of \
+                          query-plan steps). Use to verify index usage, check join order, or \
+                          sanity-check a query before running it against a large or unfamiliar table. \
+                          Returns the engine's parser/planner error verbatim for invalid SQL; \
+                          read the error before retrying."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "The SQL statement to explain."
+                        "description": "A single SQL statement to explain. Parameter placeholders are not supported here."
                     }
                 },
                 "required": ["sql"]
@@ -57,23 +86,33 @@ pub fn standard_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "run_query".to_string(),
-            description: "Execute a SQL statement (SELECT, INSERT, UPDATE, DELETE, or DDL) and return \
-                          the result rows or the number of rows affected. Statements that modify data \
-                          or schema are checked against the session's permission mode and may run \
-                          automatically, require user approval, or be rejected — attempt the statement \
-                          the user asked for and surface any approval/rejection result."
+            description: "Execute an arbitrary SQL statement, INCLUDING writes and DDL (SELECT, \
+                          INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, …). Every statement passes \
+                          through the application's permission gate, which deterministically \
+                          auto-runs the statement, prompts the user for approval, or rejects it \
+                          based on the active permission mode. Submit the statement the user \
+                          asked for as-is — do not rewrite a write into a read or pre-emptively \
+                          refuse to avoid the gate; a gate rejection is a normal outcome, not a \
+                          failure. Returns: rows for SELECT, the number of affected rows for DML, \
+                          and a success or notice for DDL. The tool response distinguishes \
+                          `auto_executed`, `awaiting_approval`, `rejected`, and `error` — \
+                          when reporting to the user, distinguish 'the user rejected this' from \
+                          'the query failed'. Submit one statement per call (no semicolon-separated \
+                          batches); explicit transaction control (BEGIN/COMMIT) is not supported \
+                          here. Parameter binding is not supported — inline literals."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "The SQL statement to run."
+                        "description": "A single SQL statement to execute."
                     },
-                    "byte_columns": {
+                    "byte_count_columns": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Names of result columns that contain raw byte counts; the UI shows a human-friendly size (e.g. 4.5 GB) beside each. Set only for true byte-count columns."
+                        "description": "List of result-column names whose values are integer byte counts. The TUI renders a human-readable size (e.g. '4.5 GB') next to the raw integer for each named column. Match the result-column name exactly as it appears in the SELECT list, including any `AS` alias and the original case. Set ONLY when selecting a true byte-count expression such as `pg_total_relation_size(...)`, `length(blob_col)`, or `octet_length(text_col)`. Do NOT set for IDs, row counts, durations, timestamps, percentages, or for `bytea`/`BLOB` columns themselves. Omit or pass an empty list when no result column is a byte count.",
+                        "default": []
                     }
                 },
                 "required": ["sql"]
@@ -87,11 +126,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_query_advertises_byte_columns() {
+    fn run_query_advertises_byte_count_columns() {
         let tools = standard_tools();
         let run_query = tools.iter().find(|t| t.name == "run_query").expect("run_query tool");
         let props = run_query.input_schema.get("properties").expect("properties");
-        let bc = props.get("byte_columns").expect("byte_columns present");
+        let bc = props.get("byte_count_columns").expect("byte_count_columns present");
         assert_eq!(bc.get("type").and_then(|v| v.as_str()), Some("array"));
         assert_eq!(bc.get("items").and_then(|i| i.get("type")).and_then(|v| v.as_str()), Some("string"));
     }
@@ -110,6 +149,40 @@ mod tests {
             desc.contains("insert") || desc.contains("modify"),
             "run_query should make clear it can execute writes: {}",
             run_query.description
+        );
+    }
+
+    #[test]
+    fn run_query_names_gate_outcomes() {
+        let tools = standard_tools();
+        let run_query = tools.iter().find(|t| t.name == "run_query").expect("run_query tool");
+        let desc = &run_query.description;
+        for outcome in ["auto_executed", "awaiting_approval", "rejected", "error"] {
+            assert!(desc.contains(outcome), "run_query description must name gate outcome '{outcome}': {desc}");
+        }
+    }
+
+    #[test]
+    fn explain_clarifies_no_side_effects() {
+        let tools = standard_tools();
+        let explain = tools.iter().find(|t| t.name == "explain").expect("explain tool");
+        let desc = explain.description.to_ascii_lowercase();
+        assert!(
+            desc.contains("without executing") || desc.contains("does not execute") || desc.contains("no side effects"),
+            "explain description must state that the statement is not executed: {}",
+            explain.description
+        );
+    }
+
+    #[test]
+    fn sample_table_documents_arbitrary_order() {
+        let tools = standard_tools();
+        let sample = tools.iter().find(|t| t.name == "sample_table").expect("sample_table tool");
+        let desc = sample.description.to_ascii_lowercase();
+        assert!(
+            desc.contains("unordered") || desc.contains("arbitrary"),
+            "sample_table description must state that row order is arbitrary: {}",
+            sample.description
         );
     }
 }
