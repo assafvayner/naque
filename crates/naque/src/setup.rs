@@ -6,7 +6,7 @@ use naque_core::PermissionMode;
 use naque_db::Database;
 use naque_llm::{Agent, AgentConfig, ClaudeProvider, GeminiProvider, HfProvider, OllamaProvider, OpenAIProvider};
 use naque_profile::{NaqueConfig, Overrides, Profile, Store, SystemSecrets};
-use naque_tui::Theme;
+use naque_tui::{Logo, Theme};
 
 use crate::cli::Args;
 use crate::help::NoConnection;
@@ -179,6 +179,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
 
     // 11. Construct App (schema loaded lazily via /learn).
     let mut app = App::new(db, agent, mode, profile_name, catastrophic_guard, row_cap);
+    app.set_logo(Logo::from_entropy()); // fresh pixel-art look each session
     app.set_active_profile(store.clone(), active_profile_name.clone(), active_env, active_connection);
     if let Some(p) = &active_profile_name {
         if let Ok(Some(model)) = naque_schema::load_schema(&store.profile_dir(p)) {
@@ -297,5 +298,95 @@ mod tests {
         let hf = default_model_for_provider(Some("hf"));
         assert_eq!(hf, "zai-org/GLM-5.2");
         assert!(!hf.contains(':'), "HF default must not pin a provider: {hf}");
+    }
+
+    // ------------------------------------------------------------------
+    // Live end-to-end: the real HF model + production preamble emit a
+    // byte-count signal — run_query `byte_columns` and/or a `<bytes>` tag.
+    //
+    // Skipped unless BOTH HF_TOKEN and NAQUE_TEST_PG_URL are set. Run with:
+    //   NAQUE_TEST_PG_URL=postgres://user:pass@localhost:5432/db \
+    //     cargo test -p naque live_hf_emits_byte_signal -- --nocapture
+    // ------------------------------------------------------------------
+    #[tokio::test]
+    async fn live_hf_emits_byte_signal() {
+        use naque::{AutoApprove, TranscriptEntry};
+
+        let (token, pg_url) = match (std::env::var("HF_TOKEN"), std::env::var("NAQUE_TEST_PG_URL")) {
+            (Ok(t), Ok(u)) if !t.is_empty() && !u.is_empty() => (t, u),
+            _ => {
+                eprintln!("[skip] HF_TOKEN and/or NAQUE_TEST_PG_URL not set — skipping live HF byte-signal test");
+                return;
+            },
+        };
+
+        const TABLE: &str = "naque_bytes_live_test";
+
+        // Stand up a dummy schema with an unmistakable byte-count column.
+        let mut setup_db = Database::connect(&pg_url).await.expect("connect (setup)");
+        setup_db
+            .execute(&format!("DROP TABLE IF EXISTS {TABLE}"))
+            .await
+            .expect("drop old table");
+        setup_db
+            .execute(&format!(
+                "CREATE TABLE {TABLE} (id INTEGER PRIMARY KEY, name TEXT NOT NULL, size_bytes BIGINT NOT NULL)"
+            ))
+            .await
+            .expect("create table");
+        setup_db
+            .execute(&format!(
+                "INSERT INTO {TABLE} (id, name, size_bytes) VALUES \
+                 (1, 'archive.tar', 4500000000), (2, 'photo.jpg', 512000), (3, 'note.txt', 1200)"
+            ))
+            .await
+            .expect("insert rows");
+
+        // Real agent: production default HF model + the production preamble.
+        let provider = HfProvider::new(token, None);
+        let agent = Agent::new(
+            Box::new(provider),
+            AgentConfig {
+                model: default_model_for_provider(Some("hf")),
+                max_iterations: 8,
+                max_tokens: 800,
+                system_preamble: SYSTEM_PREAMBLE.to_string(),
+            },
+        );
+
+        let db = Database::connect(&pg_url).await.expect("connect (app)");
+        let mut app = App::new(db, agent, PermissionMode::Wildcard, "live-test", true, 1000);
+
+        let prompt = format!(
+            "Using the table {TABLE}, list each row's name alongside its size_bytes value, \
+             and also report the total size of all rows. The size_bytes column holds a raw \
+             count of bytes."
+        );
+        app.handle_natural_language(&prompt, &mut AutoApprove)
+            .await
+            .expect("agent turn failed");
+
+        let answer = app
+            .transcript()
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                TranscriptEntry::Agent(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let tagged = app.last_byte_columns().to_vec();
+
+        eprintln!("=== agent answer ===\n{answer}\n====================");
+        eprintln!("last_byte_columns = {tagged:?}");
+
+        let _ = setup_db.execute(&format!("DROP TABLE IF EXISTS {TABLE}")).await;
+
+        assert!(
+            !tagged.is_empty() || answer.contains("<bytes>"),
+            "model emitted no byte-count signal — expected run_query byte_columns \
+             (app.last_byte_columns non-empty) and/or a <bytes>N</bytes> tag in prose.\n\
+             answer={answer:?}\nlast_byte_columns={tagged:?}"
+        );
     }
 }

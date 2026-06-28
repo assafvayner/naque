@@ -326,6 +326,7 @@ fn render_all_mode_status_bars() -> String {
             in_transaction: false,
             tokens: 134,
             cost_usd: 0.002,
+            mark: None,
         };
         let row_area = Rect::new(0, i as u16, width, 1);
         bar.render(&theme, row_area, &mut buf);

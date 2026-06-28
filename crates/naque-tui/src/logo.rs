@@ -150,7 +150,7 @@ fn upscale(grid: &[Vec<char>], factor: usize) -> Vec<Vec<char>> {
     }
     let mut out = Vec::with_capacity(grid.len() * factor);
     for row in grid {
-        let big: Vec<char> = row.iter().flat_map(|&c| std::iter::repeat(c).take(factor)).collect();
+        let big: Vec<char> = row.iter().flat_map(|&c| std::iter::repeat_n(c, factor)).collect();
         for _ in 0..factor {
             out.push(big.clone());
         }

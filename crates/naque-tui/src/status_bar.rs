@@ -18,6 +18,8 @@ pub struct StatusBar {
     pub in_transaction: bool,
     pub tokens: u64,
     pub cost_usd: f64,
+    /// Optional stylized logo glyph prepended to the bar (the session "N" mark).
+    pub mark: Option<Span<'static>>,
 }
 
 impl StatusBar {
@@ -42,12 +44,15 @@ impl StatusBar {
         let mode_value = self.mode.to_string();
         let mode_suffix = format!("  tx={}  tokens={}  {}", tx_label, self.tokens, cost);
 
-        let spans = vec![
-            Span::raw(profile_seg),
-            Span::raw(mode_prefix),
-            Span::styled(mode_value, theme.mode_style(self.mode)),
-            Span::raw(mode_suffix),
-        ];
+        let mut spans = Vec::with_capacity(6);
+        if let Some(mark) = &self.mark {
+            spans.push(mark.clone());
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::raw(profile_seg));
+        spans.push(Span::raw(mode_prefix));
+        spans.push(Span::styled(mode_value, theme.mode_style(self.mode)));
+        spans.push(Span::raw(mode_suffix));
 
         let line = Line::from(spans);
         let row_area = Rect {
@@ -74,6 +79,7 @@ mod tests {
             in_transaction: in_tx,
             tokens,
             cost_usd: cost,
+            mark: None,
         }
     }
 
@@ -133,5 +139,15 @@ mod tests {
         let bar = make_bar("mydb", PermissionMode::Strict, false, 999, 0.01);
         let s = render_bar(&bar);
         assert!(s.contains("tokens=999"), "expected tokens=999: {s:?}");
+    }
+
+    #[test]
+    fn status_bar_prepends_mark_glyph() {
+        use ratatui::text::Span;
+        let mut bar = make_bar("mydb", PermissionMode::Default, false, 0, 0.0);
+        bar.mark = Some(Span::raw("N"));
+        let s = render_bar(&bar);
+        assert!(s.starts_with('N'), "mark glyph should lead the bar: {s:?}");
+        assert!(s.contains("profile=mydb"), "profile still present: {s:?}");
     }
 }

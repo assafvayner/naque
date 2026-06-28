@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
@@ -65,7 +65,11 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pe
         .split(size);
 
     // ---- Transcript --------------------------------------------------------
-    {
+    // Fresh session (nothing said yet, no turn running): show the welcome splash
+    // instead of an empty transcript. It clears as soon as the conversation starts.
+    if app.transcript().is_empty() && !app.live.running {
+        render_welcome(frame, app, theme, chunks[0]);
+    } else {
         let lines: Vec<Line> = app
             .transcript()
             .iter()
@@ -142,6 +146,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pe
             in_transaction: false,
             tokens,
             cost_usd,
+            mark: Some(app.logo().mark_span(theme.color)),
         };
         let buf = frame.buffer_mut();
         bar.render(theme, chunks[3], buf);
@@ -197,6 +202,35 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pe
         let buf = frame.buffer_mut();
         prompt.render(theme, inner, buf);
     }
+}
+
+/// Render the fresh-session welcome splash into `area`: the speckled NAQUE
+/// wordmark plus a tagline and key hints, centered. Shown only while the
+/// transcript is empty; replaced by the conversation on first input.
+fn render_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let mut lines = app.logo().wordmark_lines(area.width, theme.color);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("ask your database in natural language", theme.dim_style())));
+    lines.push(Line::from(Span::styled(
+        "/help for commands    /profile to switch    ^C to quit",
+        theme.dim_style(),
+    )));
+
+    // Vertically center the splash (top-align if it is taller than the area).
+    let block_h = lines.len() as u16;
+    let top_pad = area.height.saturating_sub(block_h) / 2;
+    let inner = Rect {
+        x: area.x,
+        y: area.y + top_pad,
+        width: area.width,
+        height: block_h.min(area.height),
+    };
+
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 /// Compute a centered [`Rect`] for the approval modal, sized to fit the prompt
@@ -1035,6 +1069,7 @@ fn render_edit(frame: &mut Frame, app: &App, theme: &Theme, edit_buf: &str) {
             in_transaction: false,
             tokens: app.usage().input_tokens + app.usage().output_tokens,
             cost_usd: estimate_cost_usd(app.usage()),
+            mark: Some(app.logo().mark_span(theme.color)),
         };
         let buf = frame.buffer_mut();
         bar.render(theme, chunks[1], buf);
@@ -1135,6 +1170,29 @@ mod tests {
         assert!(text.contains("hello world"), "expected transcript substring in buffer:\n{text}");
         assert!(text.contains("42"), "expected result cell value in buffer:\n{text}");
         assert!(text.contains("draft input"), "expected input in buffer:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn welcome_splash_shows_on_empty_session_then_clears() {
+        let mut app = make_test_app().await;
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Fresh session: the welcome splash (tagline + wordmark glyphs) is shown.
+        terminal.draw(|f| render(f, &app, &theme, &InputLine::from(""), None)).unwrap();
+        let text = buf_text(&terminal);
+        assert!(text.contains("ask your database"), "welcome tagline should show on a fresh session:\n{text}");
+        assert!(
+            text.contains('\u{2588}') || text.contains('\u{2580}') || text.contains('\u{2584}'),
+            "welcome wordmark glyphs should render:\n{text}"
+        );
+
+        // Once the conversation starts, the splash is replaced by the transcript.
+        app.transcript.push(TranscriptEntry::User("hi".into()));
+        terminal.draw(|f| render(f, &app, &theme, &InputLine::from(""), None)).unwrap();
+        let text = buf_text(&terminal);
+        assert!(!text.contains("ask your database"), "welcome must clear once the transcript is non-empty:\n{text}");
     }
 
     #[tokio::test]

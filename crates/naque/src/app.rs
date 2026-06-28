@@ -8,7 +8,7 @@ use naque_db::{Database, Engine, QueryResult};
 use naque_llm::{Agent, Usage};
 use naque_schema::SchemaModel;
 use naque_sql::{SqlDialect, classify};
-use naque_tui::{Input, route_input};
+use naque_tui::{Input, Logo, route_input};
 use tokio::sync::Mutex;
 
 use crate::approval::Approver;
@@ -371,6 +371,8 @@ pub struct App {
     pub(crate) active_connection: Option<naque_profile::ConnectionSpec>,
     /// Loaded `context.md` for the active profile, fed to the agent.
     pub(crate) active_context: Option<String>,
+    /// Per-session pixel-art logo (welcome wordmark + status-bar N mark).
+    pub(crate) logo: Logo,
 }
 
 impl App {
@@ -408,6 +410,9 @@ impl App {
             active_env: None,
             active_connection: None,
             active_context: None,
+            // Deterministic default; the binary assigns a per-session random logo
+            // via `set_logo`. A fixed seed keeps rendering tests reproducible.
+            logo: Logo::new(0),
         }
     }
 
@@ -427,6 +432,16 @@ impl App {
 
     pub fn transcript(&self) -> &[TranscriptEntry] {
         &self.transcript
+    }
+
+    /// The per-session logo (welcome wordmark + status-bar mark).
+    pub fn logo(&self) -> &Logo {
+        &self.logo
+    }
+
+    /// Replace the logo (the binary sets a per-session random one at startup).
+    pub fn set_logo(&mut self, logo: Logo) {
+        self.logo = logo;
     }
 
     #[cfg(test)]
