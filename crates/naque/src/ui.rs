@@ -1669,6 +1669,11 @@ mod render_tests {
         assert!(text.contains("run_query"), "pinned line/step missing: {text:?}");
         assert!(text.contains("^C to cancel"), "cancel hint missing");
         assert!(text.contains("checking orders"), "reasoning missing");
+        assert!(
+            text.contains("SELECT count(*) FROM orders"),
+            "running query SQL must render in the transcript:\n{text}"
+        );
+        assert!(text.contains("│"), "SQL block gutter must render:\n{text}");
     }
 
     #[tokio::test]
