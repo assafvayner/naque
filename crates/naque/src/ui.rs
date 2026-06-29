@@ -99,27 +99,30 @@ pub fn render(
         render_welcome(frame, app, theme, chunks[0]);
     } else {
         let width = chunks[0].width;
-        let lines: Vec<Line> = app
-            .transcript()
-            .iter()
-            .enumerate()
-            .flat_map(|(i, entry)| {
-                let expanded = app.expanded_steps.contains(&i);
-                let selected = app.selected_step == Some(i);
-                transcript_lines(entry, theme, expanded, selected, width)
-            })
-            .collect();
+        let mut lines: Vec<Line> = Vec::new();
+        // Line span [start, len) each transcript entry occupies, for reveal.
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(app.transcript().len());
+        for (i, entry) in app.transcript().iter().enumerate() {
+            let expanded = app.expanded_steps.contains(&i);
+            let selected = app.selected_step == Some(i);
+            let begin = lines.len();
+            lines.extend(transcript_lines(entry, theme, expanded, selected, width));
+            spans.push((begin, lines.len() - begin));
+        }
 
-        // Bottom-align: show the most recent entries adjacent to the result /
-        // input area. Render only the last N lines that fit, and anchor them to
-        // the bottom of the transcript chunk so there is no large empty gap at
-        // the top when the history is short. scroll_offset shifts the view up
-        // from the tail (0 = following tail).
         let chunk = chunks[0];
         let visible = chunk.height as usize;
-        let off = app.live.scroll_offset as usize;
-        let end = lines.len().saturating_sub(off);
-        let start = end.saturating_sub(visible);
+        let total = lines.len();
+        // A selection pins the view on the selected step; otherwise follow the
+        // tail offset by scroll_offset (0 = following the tail).
+        let start = match app.selected_step.and_then(|i| spans.get(i).copied()) {
+            Some((s, l)) => reveal_window(total, visible, s, l),
+            None => {
+                let off = app.live.scroll_offset as usize;
+                total.saturating_sub(off).saturating_sub(visible)
+            },
+        };
+        let end = (start + visible).min(total);
         let tail: Vec<Line> = lines[start..end].to_vec();
         let used = tail.len() as u16;
         let pad = chunk.height.saturating_sub(used);
@@ -463,6 +466,20 @@ fn tool_step_lines(
     }
 
     out
+}
+
+/// First visible transcript line so the selected entry (its `[sel_start,
+/// sel_start+sel_len)` line span) is on screen: bottom-aligned, or top-aligned
+/// when the entry is taller than the viewport.
+fn reveal_window(total: usize, visible: usize, sel_start: usize, sel_len: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    if sel_len >= visible {
+        sel_start.min(total - visible)
+    } else {
+        (sel_start + sel_len).min(total).saturating_sub(visible)
+    }
 }
 
 fn transcript_lines<'a>(
@@ -1848,6 +1865,18 @@ mod render_tests {
             &theme,
         );
         assert_eq!(line_text(&l[0]), "  ▸ sample_table users \u{00B7} limit 10");
+    }
+
+    #[test]
+    fn reveal_window_positions_selection() {
+        // Everything fits: window starts at 0.
+        assert_eq!(reveal_window(8, 10, 3, 2), 0);
+        // Short selection in the middle is bottom-aligned: [42, 52) shows [50, 52).
+        assert_eq!(reveal_window(100, 10, 50, 2), 42);
+        // Selection at the very end reproduces the tail window.
+        assert_eq!(reveal_window(100, 10, 98, 2), 90);
+        // Selection taller than the viewport is top-aligned at its first line.
+        assert_eq!(reveal_window(100, 10, 30, 20), 30);
     }
 
     #[test]
