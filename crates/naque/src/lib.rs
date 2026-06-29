@@ -17,8 +17,6 @@ use naque_core::gate::{GateDecision, QueryKind, gate_decision};
 use naque_db::{Database, Engine, QueryResult};
 use naque_sql::{SqlDialect, classify};
 
-use crate::approval::ApprovalDecision as AD;
-
 /// Classify `sql`, gate it, prompt if needed, and route to the correct
 /// connection (`fetch`/`fetch_readonly`/`execute`).
 ///
@@ -55,13 +53,13 @@ pub async fn run_gated(
                 .unwrap_or_else(|| "SQL".to_string());
 
             match approver.approve(sql, &label, decision).await {
-                AD::Accept => sql.to_string(),
-                AD::AcceptEdited(new_sql) => {
+                ApprovalDecision::Accept => sql.to_string(),
+                ApprovalDecision::AcceptEdited(new_sql) => {
                     // Recurse: re-classify and re-gate the edited SQL.
                     // This is a tail recursion via Box::pin to avoid stack overflow on deep edits.
                     return Box::pin(run_gated(db, mode, catastrophic_guard, &new_sql, kind, approver)).await;
                 },
-                AD::Reject => return Err("rejected".to_string()),
+                ApprovalDecision::Reject => return Err("rejected".to_string()),
             }
         },
     };

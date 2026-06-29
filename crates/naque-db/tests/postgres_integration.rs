@@ -240,3 +240,76 @@ async fn pg_type_stringification() {
     // Cleanup.
     db.execute("DROP TABLE IF EXISTS naque_test_types").await.expect("cleanup DROP");
 }
+
+// ---------------------------------------------------------------------------
+// Test: render common types that previously showed <unrenderable:...>
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pg_renders_common_types() {
+    let Some(url) = pg_url() else {
+        eprintln!("skipping: NAQUE_TEST_PG_URL not set");
+        return;
+    };
+
+    let mut db = Database::connect(&url).await.expect("connect");
+
+    let result = db
+        .fetch(
+            "SELECT \
+             INTERVAL '1 year 2 months 3 days 4 hours 5 minutes 6 seconds' AS iv, \
+             '$123.45'::money AS amount, \
+             int4range(1, 10) AS r, \
+             ARRAY[1,2,3]::int4[] AS arr, \
+             ARRAY['a', NULL, 'c']::text[] AS sarr, \
+             ARRAY['192.168.1.0/24','10.0.0.0/8']::cidr[] AS netarr, \
+             '192.168.1.0/24'::cidr AS net, \
+             '08:00:2b:01:02:03'::macaddr AS mac, \
+             B'101'::bit(3) AS bits, \
+             12345::oid AS the_oid, \
+             1.50::numeric AS num, \
+             ARRAY[1.50, 2.00]::numeric[] AS numarr, \
+             ARRAY[INTERVAL '1 day', INTERVAL '2 hours'] AS ivarr, \
+             ARRAY['$1.50'::money, '$2.00'::money] AS moneyarr, \
+             ARRAY[10, 20]::oid[] AS oidarr, \
+             ARRAY[B'101'::bit(3), B'010'::bit(3)] AS bitarr, \
+             ARRAY['08:00:2b:01:02:03'::macaddr] AS macarr",
+        )
+        .await
+        .expect("SELECT common types");
+
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    let cell = |name: &str| -> String {
+        let idx = result.columns.iter().position(|c| c.name == name).expect("column present");
+        row[idx].clone().expect("non-null cell")
+    };
+
+    assert_eq!(cell("iv"), "1 year 2 mons 3 days 04:05:06");
+    assert_eq!(cell("amount"), "123.45");
+    assert_eq!(cell("r"), "[1,10)");
+    assert_eq!(cell("arr"), "{1,2,3}");
+    assert_eq!(cell("sarr"), "{a,NULL,c}");
+    assert_eq!(cell("netarr"), "{192.168.1.0/24,10.0.0.0/8}");
+    assert_eq!(cell("net"), "192.168.1.0/24");
+    assert_eq!(cell("mac"), "08:00:2b:01:02:03");
+    assert_eq!(cell("bits"), "101");
+    assert_eq!(cell("the_oid"), "12345");
+    // numeric renders losslessly via BigDecimal (not lossy f64). sqlx's
+    // numeric->BigDecimal keeps base-10000 group precision, hence the extra zeros.
+    assert_eq!(cell("num"), "1.5000");
+    assert_eq!(cell("numarr"), "{1.5000,2}");
+    // Array element types that lack Display, rendered via format_array_with.
+    assert_eq!(cell("ivarr"), "{1 day,02:00:00}");
+    assert_eq!(cell("moneyarr"), "{1.50,2.00}");
+    assert_eq!(cell("oidarr"), "{10,20}");
+    assert_eq!(cell("bitarr"), "{101,010}");
+    assert_eq!(cell("macarr"), "{08:00:2b:01:02:03}");
+
+    // No cell should be an unrenderable placeholder.
+    for (c, v) in result.columns.iter().zip(row.iter()) {
+        if let Some(s) = v {
+            assert!(!s.starts_with("<unrenderable"), "column {} rendered as {s}", c.name);
+        }
+    }
+}

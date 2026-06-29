@@ -14,19 +14,23 @@
 //! All three files share the `NaqueFile` parse type; absent fields are `None`.
 
 mod config;
+mod credscan;
 mod discovery;
 mod error;
 mod file;
 mod profile;
+mod profile_store;
 mod resolve;
 mod secrets;
 mod store;
 
 pub use config::NaqueConfig;
+pub use credscan::{project_local_password_warning, strip_url_password};
 pub use discovery::find_naque_toml;
 pub use error::ConfigError;
 pub use file::NaqueFile;
-pub use profile::{ConnectionSpec, ProfileBody, ProfileEngine};
+pub use profile::{ConnId, ConnectionSpec, ProfileBody, ProfileEngine, url_conn_id};
+pub use profile_store::{Profile, match_profile_by_url};
 pub use resolve::{Overrides, Resolved, detect_provider, resolve};
 pub use secrets::{Secrets, SystemSecrets};
 pub use store::Store;

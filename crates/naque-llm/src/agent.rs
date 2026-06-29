@@ -150,7 +150,7 @@ impl Agent {
                 tool_invocations.push(call.name.clone());
                 observer.on_event(AgentEvent::ToolCallStarted {
                     name: call.name.clone(),
-                    sql: tool_call_sql(call),
+                    detail: tool_call_detail(call),
                 });
                 let (content, is_error) = match executor.execute(call).await {
                     Ok(content) => (content, false),
@@ -170,6 +170,21 @@ impl Agent {
         }
     }
 
+    /// Single-shot completion: one provider call with no tools and a fresh
+    /// (non-persisted) message. Used for short generated text such as a schema
+    /// overview. Does not touch the running conversation memory.
+    pub async fn complete_once(&self, system: &str, user: &str) -> Result<String, LlmError> {
+        let req = LlmRequest {
+            model: self.config.model.clone(),
+            system: system.to_string(),
+            messages: vec![Message::User(user.to_string())],
+            tools: Vec::new(),
+            max_tokens: self.config.max_tokens,
+        };
+        let resp = self.provider.complete(&req).await?;
+        Ok(resp.text.unwrap_or_default())
+    }
+
     /// Maximum provider round-trips per turn (from the agent config).
     pub fn max_iterations(&self) -> u32 {
         self.config.max_iterations
@@ -186,8 +201,17 @@ impl Agent {
     }
 }
 
-/// Extract a human-readable SQL/target string from a tool call for display.
-fn tool_call_sql(call: &crate::ToolCall) -> Option<String> {
+/// Extract a human-readable detail string from a tool call for display.
+///
+/// `run_query`/`explain` carry the SQL verbatim; `sample_table` shows its target
+/// and row limit (`"users · limit 10"`); `inspect_table` and unknown tools fall
+/// back to the `sql`/`name` argument.
+fn tool_call_detail(call: &crate::ToolCall) -> Option<String> {
+    if call.name == "sample_table" {
+        let name = call.input.get("name").and_then(|v| v.as_str())?;
+        let limit = call.input.get("limit").and_then(|v| v.as_u64()).unwrap_or(10);
+        return Some(format!("{name} · limit {limit}"));
+    }
     call.input
         .get("sql")
         .and_then(|v| v.as_str())
@@ -258,8 +282,8 @@ mod observer_tests {
         assert_eq!(obs.events.first(), Some(&AgentEvent::TurnStarted));
         assert!(matches!(obs.events.last(), Some(AgentEvent::TurnFinished { .. })));
         let started = obs.events.iter().position(|e| {
-            matches!(e, AgentEvent::ToolCallStarted { name, sql }
-                if name == "run_query" && sql.as_deref() == Some("SELECT 1"))
+            matches!(e, AgentEvent::ToolCallStarted { name, detail }
+                if name == "run_query" && detail.as_deref() == Some("SELECT 1"))
         });
         let finished = obs
             .events
@@ -337,5 +361,35 @@ mod observer_tests {
         assert!(out.cancelled);
         assert_eq!(agent.history_len(), before, "conversation rolled back to boundary");
         assert_eq!(obs.events.last(), Some(&AgentEvent::Cancelled));
+    }
+
+    #[test]
+    fn tool_call_detail_per_tool() {
+        let call = |name: &str, input: serde_json::Value| ToolCall {
+            id: "x".into(),
+            name: name.into(),
+            input,
+        };
+        assert_eq!(
+            tool_call_detail(&call("run_query", serde_json::json!({ "sql": "SELECT 1" }))).as_deref(),
+            Some("SELECT 1")
+        );
+        assert_eq!(
+            tool_call_detail(&call("explain", serde_json::json!({ "sql": "SELECT 2" }))).as_deref(),
+            Some("SELECT 2")
+        );
+        assert_eq!(
+            tool_call_detail(&call("inspect_table", serde_json::json!({ "name": "orders" }))).as_deref(),
+            Some("orders")
+        );
+        assert_eq!(
+            tool_call_detail(&call("sample_table", serde_json::json!({ "name": "users", "limit": 25 }))).as_deref(),
+            Some("users · limit 25")
+        );
+        // limit defaults to 10 when omitted.
+        assert_eq!(
+            tool_call_detail(&call("sample_table", serde_json::json!({ "name": "users" }))).as_deref(),
+            Some("users · limit 10")
+        );
     }
 }

@@ -14,8 +14,9 @@ pub enum AgentEvent {
     LlmCallStarted { iteration: u32 },
     /// A fragment of model-generated text (streamed; may arrive many times).
     TextDelta(String),
-    /// The agent is about to execute a tool call.
-    ToolCallStarted { name: String, sql: Option<String> },
+    /// The agent is about to execute a tool call. `detail` is the SQL (run_query/
+    /// explain), or the target summary (e.g. `"users · limit 10"`), for display.
+    ToolCallStarted { name: String, detail: Option<String> },
     /// A tool call finished. `summary` is a one-line digest of the result.
     ToolCallFinished {
         name: String,
@@ -58,6 +59,12 @@ impl AgentObserver for RecordingObserver {
 /// `"N row(s) affected"`, an empty `"(0 rows)"`/`"(no rows)"`, or a
 /// header/separator/rows table (counted as `lines - 2`). Errors and anything
 /// else fall back to a trimmed, length-capped first line.
+///
+/// The `run_query` executor wraps its output in a labelled envelope
+/// (`auto_executed` / `rejected` / `error` on the first line). This function
+/// strips a recognized envelope label before counting so the transcript row
+/// count stays accurate, and surfaces non-tabular envelopes (`rejected`,
+/// `error`) with a short body-derived summary instead of a row count.
 pub fn summarize_tool_result(result: &str, is_error: bool) -> String {
     const MAX: usize = 80;
 
@@ -71,10 +78,25 @@ pub fn summarize_tool_result(result: &str, is_error: bool) -> String {
         }
     };
 
-    if is_error {
-        return cap(result.lines().next().unwrap_or("").trim());
+    let (envelope, body) = split_envelope(result);
+    match envelope {
+        Some("rejected") | Some("error") => {
+            let label = envelope.unwrap();
+            let detail = first_body_detail(body);
+            return cap(&if detail.is_empty() {
+                label.to_string()
+            } else {
+                format!("{label}: {detail}")
+            });
+        },
+        _ => {},
     }
-    let trimmed = result.trim_end();
+    let payload = body.unwrap_or(result);
+
+    if is_error {
+        return cap(payload.lines().next().unwrap_or("").trim());
+    }
+    let trimmed = payload.trim_end();
     if let Some(first) = trimmed.lines().next()
         && first.contains("row(s) affected")
     {
@@ -89,6 +111,34 @@ pub fn summarize_tool_result(result: &str, is_error: bool) -> String {
         return format!("{} rows", line_count - 2);
     }
     cap(trimmed.lines().next().unwrap_or("").trim())
+}
+
+/// If `result` begins with one of the executor's envelope labels followed by a
+/// newline, return `(Some(label), Some(body_after_newline))`. Otherwise return
+/// `(None, None)` so the caller can fall back to the legacy parsing path.
+fn split_envelope(result: &str) -> (Option<&'static str>, Option<&str>) {
+    for label in ["auto_executed", "rejected", "error"] {
+        if let Some(rest) = result.strip_prefix(label)
+            && let Some(body) = rest.strip_prefix('\n')
+        {
+            return (Some(label), Some(body));
+        }
+    }
+    (None, None)
+}
+
+/// Pull a short human-readable detail out of a `rejected`/`error` envelope
+/// body. Strips a leading `reason:` or `message:` key and trims surrounding
+/// whitespace. Returns an empty string when the body has no useful first line.
+fn first_body_detail(body: Option<&str>) -> String {
+    let Some(body) = body else { return String::new() };
+    let first = body.lines().next().unwrap_or("").trim();
+    for key in ["reason:", "message:"] {
+        if let Some(rest) = first.strip_prefix(key) {
+            return rest.trim().to_string();
+        }
+    }
+    first.to_string()
 }
 
 #[cfg(test)]
@@ -138,5 +188,47 @@ mod tests {
         let out = summarize_tool_result(&long, true);
         assert!(out.chars().count() <= 80, "summary must be capped: {}", out.len());
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn summarize_auto_executed_envelope_matches_legacy_body() {
+        let body = "id | name\n---------\n1 | a\n2 | b\n";
+        let wrapped = format!("auto_executed\n{body}");
+        assert_eq!(summarize_tool_result(&wrapped, false), summarize_tool_result(body, false));
+        assert_eq!(summarize_tool_result(&wrapped, false), "2 rows");
+    }
+
+    #[test]
+    fn summarize_auto_executed_envelope_preserves_rows_affected() {
+        let wrapped = "auto_executed\n3 row(s) affected";
+        assert_eq!(summarize_tool_result(wrapped, false), "3 row(s) affected");
+    }
+
+    #[test]
+    fn summarize_auto_executed_envelope_preserves_zero_rows() {
+        let wrapped = "auto_executed\nid\n--\n(0 rows)\n";
+        assert_eq!(summarize_tool_result(wrapped, false), "0 rows");
+    }
+
+    #[test]
+    fn summarize_rejected_envelope_includes_reason() {
+        let wrapped = "rejected\nreason: user rejected the statement at the approval prompt";
+        let out = summarize_tool_result(wrapped, false);
+        assert!(out.starts_with("rejected"), "expected rejected-prefixed summary, got: {out}");
+        assert!(out.contains("user rejected"), "summary should carry the reason text: {out}");
+    }
+
+    #[test]
+    fn summarize_error_envelope_includes_message() {
+        let wrapped = "error\nmessage: no such table: foo";
+        let out = summarize_tool_result(wrapped, true);
+        assert!(out.starts_with("error"), "expected error-prefixed summary, got: {out}");
+        assert!(out.contains("no such table: foo"), "summary should carry the message text: {out}");
+    }
+
+    #[test]
+    fn summarize_bare_envelope_label_returns_label() {
+        assert_eq!(summarize_tool_result("rejected\n", false), "rejected");
+        assert_eq!(summarize_tool_result("error\n", true), "error");
     }
 }

@@ -1,5 +1,6 @@
 //! Headless engine — routes input, gates SQL, drives the LLM agent.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use naque_core::PermissionMode;
@@ -8,7 +9,7 @@ use naque_db::{Database, Engine, QueryResult};
 use naque_llm::{Agent, Usage};
 use naque_schema::SchemaModel;
 use naque_sql::{SqlDialect, classify};
-use naque_tui::{Input, route_input};
+use naque_tui::{Input, Logo, route_input};
 use tokio::sync::Mutex;
 
 use crate::approval::Approver;
@@ -70,7 +71,7 @@ pub enum TranscriptEntry {
     /// A tool step; renders multi-line while `Running`, collapses when done.
     ToolStep {
         name: String,
-        sql: Option<String>,
+        detail: Option<String>,
         status: StepStatus,
         summary: Option<String>,
     },
@@ -91,9 +92,9 @@ pub fn apply_event_to_transcript(
     cur: &mut Option<usize>,
     event: &naque_llm::AgentEvent,
 ) {
-    use naque_llm::AgentEvent as E;
+    use naque_llm::AgentEvent;
     match event {
-        E::TextDelta(chunk) => {
+        AgentEvent::TextDelta(chunk) => {
             let idx = match *cur {
                 Some(i) => i,
                 None => {
@@ -107,16 +108,16 @@ pub fn apply_event_to_transcript(
                 s.push_str(chunk);
             }
         },
-        E::ToolCallStarted { name, sql } => {
+        AgentEvent::ToolCallStarted { name, detail } => {
             *cur = None;
             transcript.push(TranscriptEntry::ToolStep {
                 name: name.clone(),
-                sql: sql.clone(),
+                detail: detail.clone(),
                 status: StepStatus::Running,
                 summary: None,
             });
         },
-        E::ToolCallFinished { summary, is_error, .. } => {
+        AgentEvent::ToolCallFinished { summary, is_error, .. } => {
             if let Some(TranscriptEntry::ToolStep {
                 status, summary: slot, ..
             }) = transcript.iter_mut().rev().find(|e| {
@@ -132,19 +133,119 @@ pub fn apply_event_to_transcript(
                 *slot = Some(summary.clone());
             }
         },
-        E::TurnFinished { .. } => {
+        AgentEvent::TurnFinished {
+            iterations,
+            hit_iteration_cap,
+        } => {
             if let Some(i) = cur.take()
                 && let Some(TranscriptEntry::Reasoning(s)) = transcript.get(i)
             {
                 let answer = s.clone();
                 transcript[i] = TranscriptEntry::Agent(answer);
             }
+            // On an iteration-cap finish the loop's last events were tool calls,
+            // so `cur` is already None and nothing was relabeled into an answer.
+            // Surface an explicit notice so the turn doesn't appear to stop silently.
+            if *hit_iteration_cap {
+                transcript.push(TranscriptEntry::Info(format!(
+                    "(stopped after {iterations} rounds: reached max iterations)"
+                )));
+            }
         },
-        E::Cancelled => {
+        AgentEvent::Cancelled => {
             *cur = None;
             transcript.push(TranscriptEntry::Info("(cancelled)".into()));
         },
-        E::TurnStarted | E::LlmCallStarted { .. } | E::UsageUpdated(_) => {},
+        AgentEvent::TurnStarted | AgentEvent::LlmCallStarted { .. } | AgentEvent::UsageUpdated(_) => {},
+    }
+}
+
+/// System prompt for one-shot schema-overview generation invoked by `/save`.
+///
+/// The overview is stored under `## Overview` in the profile's context document
+/// alongside the mechanical `## Schema` dump and is re-injected into every
+/// agent turn. The prompt is tuned for an agent-facing primer (not casual
+/// reading): it forbids restating the schema dump, asks for engine-specific
+/// gotchas, and bounds output so the re-injected content stays cheap.
+fn overview_system_prompt(engine: Engine) -> String {
+    let engine_name = match engine {
+        Engine::Postgres => "PostgreSQL",
+        Engine::Sqlite => "SQLite",
+    };
+    let engine_gotcha_examples = match engine {
+        Engine::Postgres => "JSONB, array columns, partial indexes, schemas other than `public`, `search_path` quirks",
+        Engine::Sqlite => {
+            "type affinity surprises, `WITHOUT ROWID` tables, attached databases, date/time stored as TEXT vs INTEGER"
+        },
+    };
+    format!(
+        "You are writing a catalog primer for a SQL-generating agent that queries a {engine_name} \
+         database. The mechanical schema (tables, columns, types, PK/FK) is preserved verbatim in a \
+         separate `## Schema` section the agent always sees, so do NOT restate it. Summarize only \
+         what the agent needs that the schema dump does not surface:\n\
+         - Open with the domain in 3–6 words (e.g. \"Multi-tenant SaaS billing with usage metering\"). No \"This schema represents…\" filler.\n\
+         - The 3–7 most central entities (ranked by FK fan-in/fan-out, or as the obvious subject of the domain).\n\
+         - A 2–3 line join cheatsheet of the most common multi-hop join paths an agent will need, written in arrow form (e.g. `orders → order_items → products via order_id/product_id`).\n\
+         - Naming conventions actually present: snake_case vs camelCase, suffix patterns (`_id`, `_at`, `is_`), soft-delete columns, tenancy columns, audit columns, join-table naming (e.g. `users_roles` or `user_role_link`), and polymorphic relations (e.g. `commentable_type` + `commentable_id`).\n\
+         - Gotchas: ambiguous join paths, denormalized duplicates, enum/status columns whose values are not self-explanatory, nullable FKs, archival/shadow tables, tables that look like entities but are join tables, tenancy isolation columns (e.g. `org_id` or `tenant_id` present on most or all tables — easy to forget in WHERE clauses and produce cross-tenant leaks), audit-pattern leakage (e.g. `created_by`/`updated_by` user-FK columns whose values may be system actors or admins rather than the end user), and {engine_name}-specific features in use ({engine_gotcha_examples}).\n\
+         Rules:\n\
+         - Budget: ≤180 words. Short bullets are fine; do not pad.\n\
+         - Ground every claim in evidence from names, types, or constraints. For obscure tables write \"purpose unclear from schema\" rather than inventing one.\n\
+         - For empty or trivial schemas (few tables, no FKs), produce a single line and stop.\n\
+         - For very large schemas, prioritize the dominant subject area and add a closing note like \"other subsystems omitted from overview\" rather than uniform shallow coverage.\n\
+         - Order sections consistently: entities first, conventions second, gotchas last, so diffs across re-saves are meaningful.\n\
+         - When regenerating after a schema change, reuse the exact phrasing for unchanged subsystems so `/save` diffs highlight real changes rather than cosmetic rephrasing.\n\
+         - A user-owned `## Notes` section is preserved alongside this overview and may override anything here; do not speculate about policy, ownership, business intent, or rules that belong in those notes — describe only what the schema evidence supports.\n\
+         - Return ONLY the overview body. No markdown headings, no code fences, no preface, no closing summary, no meta-commentary (\"as a database expert…\", \"it appears that…\")."
+    )
+}
+
+/// One-line description of what the active permission mode lets the agent do.
+///
+/// Injected into each turn's context so the model's behavior tracks `/mode`
+/// changes. Without it the agent only infers the mode from tool rejections and
+/// keeps refusing writes after the user switches to a permissive mode.
+///
+/// Every variant follows the same `Permission mode: NAME. Policy: …. Behavior:
+/// ….` shape and shares a trailing reminder that the application (not the
+/// model) is the security boundary, so the LLM does not self-censor.
+pub(crate) fn mode_guidance(mode: PermissionMode, catastrophic_guard: bool) -> String {
+    const NOT_SECURITY_BOUNDARY: &str = "The application enforces these rules deterministically — \
+        do not refuse the user's request on permission grounds; submit it and let the gate decide.";
+    const TERMS: &str = "Terms: 'reads' = SELECT/SHOW/EXPLAIN-style queries; 'writes' = INSERT, \
+        UPDATE, DELETE, and DDL.";
+
+    let body = match mode {
+        PermissionMode::Wildcard => {
+            "Permission mode: WILDCARD. Policy: every statement (reads and writes) runs immediately \
+             with no approval step. Behavior: chain multi-step writes without pausing for approval."
+        },
+        PermissionMode::Default => {
+            "Permission mode: DEFAULT. Policy: reads run automatically; writes require user \
+             approval at the gate. Behavior: issue the read or write the user asked for — a gate \
+             rejection is a normal outcome, not a failure."
+        },
+        PermissionMode::ReadOnly => {
+            "Permission mode: READ-ONLY. Policy: reads run automatically; any write requires user \
+             approval at the gate. Behavior: if the user requests a write, issue it — the gate \
+             will prompt for approval."
+        },
+        PermissionMode::Strict => {
+            "Permission mode: STRICT. Policy: every `run_query` statement (read or write) \
+             requires user approval at the gate. Behavior: propose statements normally and expect \
+             a confirmation round-trip on every execution; do not batch or self-censor in \
+             anticipation of denials. Introspection tools (`inspect_table`, `sample_table`, \
+             `explain`) bypass the gate and run automatically; only `run_query` requires \
+             per-statement approval in STRICT."
+        },
+    };
+
+    if catastrophic_guard && matches!(mode, PermissionMode::Wildcard) {
+        let guard_clause = "Exception: DROP, TRUNCATE, and unqualified DELETE/UPDATE still require \
+             user confirmation — surface these clearly when proposing them.";
+        format!("{TERMS} {body} {guard_clause} {NOT_SECURITY_BOUNDARY}")
+    } else {
+        format!("{TERMS} {body} {NOT_SECURITY_BOUNDARY}")
     }
 }
 
@@ -184,7 +285,7 @@ mod apply_tests {
             &mut cur,
             &AgentEvent::ToolCallStarted {
                 name: "run_query".into(),
-                sql: Some("SELECT 1".into()),
+                detail: Some("SELECT 1".into()),
             },
         );
         assert!(matches!(
@@ -230,6 +331,44 @@ mod apply_tests {
     }
 
     #[test]
+    fn finish_with_iteration_cap_pushes_notice() {
+        // A capped turn ends right after tool calls, so `cur` is None and there
+        // is no trailing reasoning to relabel — the answer would otherwise be
+        // dropped. The finish must leave an explicit notice instead.
+        let mut t: Vec<TranscriptEntry> = vec![];
+        let mut cur: Option<usize> = None;
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::ToolCallStarted {
+                name: "run_query".into(),
+                detail: Some("SELECT 1".into()),
+            },
+        );
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::ToolCallFinished {
+                name: "run_query".into(),
+                summary: "1 rows".into(),
+                is_error: false,
+            },
+        );
+        apply_event_to_transcript(
+            &mut t,
+            &mut cur,
+            &AgentEvent::TurnFinished {
+                iterations: 12,
+                hit_iteration_cap: true,
+            },
+        );
+        assert!(
+            matches!(t.last(), Some(TranscriptEntry::Info(s)) if s.contains("max iterations")),
+            "capped finish must push an explicit notice, got {t:?}"
+        );
+    }
+
+    #[test]
     fn tool_call_after_reasoning_finalizes_it() {
         let mut t: Vec<TranscriptEntry> = vec![];
         let mut cur: Option<usize> = None;
@@ -239,7 +378,7 @@ mod apply_tests {
             &mut cur,
             &AgentEvent::ToolCallStarted {
                 name: "run_query".into(),
-                sql: None,
+                detail: None,
             },
         );
         apply_event_to_transcript(&mut t, &mut cur, &AgentEvent::TextDelta("the answer is 5".into()));
@@ -270,6 +409,8 @@ pub struct App {
     pub(crate) usage: Usage,
     pub(crate) row_cap: usize,
     pub(crate) last_result: Option<QueryResult>,
+    /// Indices of `last_result` columns to render with a byte-size suffix.
+    pub(crate) last_byte_columns: Vec<usize>,
     pub(crate) transcript: Vec<TranscriptEntry>,
     pub(crate) should_quit: bool,
     pub(crate) max_iterations: u32,
@@ -280,6 +421,19 @@ pub struct App {
     pub(crate) inflight: Option<crate::turn::RunningTurn>,
     pub(crate) event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<naque_llm::AgentEvent>>,
     pub(crate) approval_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::approval::ApprovalRequest>>,
+    pub(crate) store: Option<naque_profile::Store>,
+    pub(crate) active_profile: Option<String>,
+    pub(crate) active_env: Option<String>,
+    /// Connection spec to persist on `/save` (by-reference; no plaintext secret).
+    pub(crate) active_connection: Option<naque_profile::ConnectionSpec>,
+    /// Loaded `context.md` for the active profile, fed to the agent.
+    pub(crate) active_context: Option<String>,
+    /// Per-session pixel-art logo (welcome wordmark + status-bar N mark).
+    pub(crate) logo: Logo,
+    /// Transcript index of the currently selected tool step (None = follow tail).
+    pub(crate) selected_step: Option<usize>,
+    /// Transcript indices of tool steps the user has expanded.
+    pub(crate) expanded_steps: HashSet<usize>,
 }
 
 impl App {
@@ -302,6 +456,7 @@ impl App {
             usage: Usage::default(),
             row_cap,
             last_result: None,
+            last_byte_columns: Vec::new(),
             transcript: Vec::new(),
             should_quit: false,
             max_iterations,
@@ -311,6 +466,16 @@ impl App {
             inflight: None,
             event_rx: None,
             approval_rx: None,
+            store: None,
+            active_profile: None,
+            active_env: None,
+            active_connection: None,
+            active_context: None,
+            // Deterministic default; the binary assigns a per-session random logo
+            // via `set_logo`. A fixed seed keeps rendering tests reproducible.
+            logo: Logo::new(0),
+            selected_step: None,
+            expanded_steps: HashSet::new(),
         }
     }
 
@@ -324,8 +489,22 @@ impl App {
         self.last_result.as_ref()
     }
 
+    pub fn last_byte_columns(&self) -> &[usize] {
+        &self.last_byte_columns
+    }
+
     pub fn transcript(&self) -> &[TranscriptEntry] {
         &self.transcript
+    }
+
+    /// The per-session logo (welcome wordmark + status-bar mark).
+    pub fn logo(&self) -> &Logo {
+        &self.logo
+    }
+
+    /// Replace the logo (the binary sets a per-session random one at startup).
+    pub fn set_logo(&mut self, logo: Logo) {
+        self.logo = logo;
     }
 
     #[cfg(test)]
@@ -362,6 +541,110 @@ impl App {
         self.transcript.push(TranscriptEntry::Info(msg.into()));
     }
 
+    /// Install the profile store and the active profile/env identity (called by
+    /// `setup` at launch and by `switch_to`).
+    pub fn set_active_profile(
+        &mut self,
+        store: naque_profile::Store,
+        profile: Option<String>,
+        env: Option<String>,
+        connection: Option<naque_profile::ConnectionSpec>,
+    ) {
+        self.store = Some(store);
+        if let Some(p) = &profile {
+            self.profile_name = p.clone();
+        }
+        self.active_profile = profile;
+        self.active_env = env;
+        self.active_connection = connection;
+    }
+
+    pub fn set_schema(&mut self, model: naque_schema::SchemaModel) {
+        self.schema = Some(model);
+    }
+
+    pub fn set_active_context(&mut self, doc: String) {
+        self.active_context = Some(doc);
+    }
+
+    pub(crate) fn list_profiles(&self) -> Result<Vec<String>, AppError> {
+        match &self.store {
+            Some(s) => s.list_profiles().map_err(|e| AppError::Other(e.to_string())),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) fn list_environments(&self, profile: &str) -> Result<Vec<String>, AppError> {
+        let Some(store) = &self.store else {
+            return Ok(Vec::new());
+        };
+        match store.load_profile(profile).map_err(|e| AppError::Other(e.to_string()))? {
+            Some(p) => Ok(p.environments.keys().cloned().collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Switch the live session to `profile`/`env`: reconnect the database, load
+    /// the profile's saved schema + context, apply its mode/row_cap, and clear
+    /// the agent's memory. On any failure the current session is left intact.
+    #[allow(dead_code)]
+    pub async fn switch_to(&mut self, profile: &str, env: &str) -> Result<(), AppError> {
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| AppError::Other("no profile store configured".into()))?;
+        let loaded = store
+            .load_profile(profile)
+            .map_err(|e| AppError::Other(e.to_string()))?
+            .ok_or_else(|| AppError::Other(format!("profile '{profile}' not found")))?;
+        let spec = loaded
+            .environments
+            .get(env)
+            .cloned()
+            .ok_or_else(|| AppError::Other(format!("environment '{env}' not found in profile '{profile}'")))?;
+
+        // All fallible work first — resolve, load schema/context, then connect —
+        // so any failure leaves `self` untouched (connect is the last fallible step).
+        let url = spec
+            .resolve_url(&naque_profile::SystemSecrets)
+            .map_err(|e| AppError::Other(format!("cannot resolve connection: {e}")))?;
+        let new_schema =
+            naque_schema::load_schema(&store.profile_dir(profile)).map_err(|e| AppError::Other(e.to_string()))?;
+        let new_context = std::fs::read_to_string(store.context_path(profile)).ok();
+        let new_db = naque_db::Database::connect(&url)
+            .await
+            .map_err(|e| AppError::Other(format!("connect failed (keeping current session): {e}")))?;
+
+        // Commit — all infallible from here.
+        *self.db.lock().await = new_db;
+        self.schema = new_schema;
+        self.active_context = new_context;
+        if let Some(mode_str) = &loaded.config.mode
+            && let Ok(m) = mode_str.parse::<naque_core::PermissionMode>()
+        {
+            self.mode = m;
+        }
+        if let Some(cap) = loaded.config.row_cap {
+            self.row_cap = cap as usize;
+        }
+        if let Some(a) = self.agent_slot.as_mut() {
+            a.clear();
+        }
+        self.profile_name = profile.to_string();
+        self.active_profile = Some(profile.to_string());
+        self.active_env = Some(env.to_string());
+        self.active_connection = Some(spec);
+
+        if loaded.config.provider.is_some() || loaded.config.model.is_some() {
+            self.transcript.push(TranscriptEntry::Info(
+                "note: provider/model changes from this profile apply on next launch".to_string(),
+            ));
+        }
+        self.transcript
+            .push(TranscriptEntry::Info(format!("switched to {profile}/{env}")));
+        Ok(())
+    }
+
     // --- SQL execution -----------------------------------------------------
 
     /// Classify `sql`, run the permission gate, possibly prompt via `approver`,
@@ -393,6 +676,7 @@ impl App {
                 }
 
                 self.last_result = Some(capped);
+                self.last_byte_columns = Vec::new();
                 self.transcript.push(TranscriptEntry::Sql {
                     sql: sql.to_string(),
                     label,
@@ -413,9 +697,27 @@ impl App {
 
     // --- Natural language --------------------------------------------------
 
+    /// Per-turn context appended to the agent's system prompt: the active
+    /// permission mode (so behavior tracks `/mode`) then the schema catalog.
+    fn turn_context(&self) -> String {
+        let guidance = mode_guidance(self.mode, self.catastrophic_guard);
+        // Prefer the saved context doc (schema outline + overview + notes); fall
+        // back to the compact catalog for ad-hoc sessions without a profile.
+        let body = if let Some(ctx) = &self.active_context {
+            ctx.clone()
+        } else {
+            self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default()
+        };
+        if body.is_empty() {
+            guidance
+        } else {
+            format!("{guidance}\n\n{body}")
+        }
+    }
+
     pub async fn handle_natural_language(&mut self, text: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
         self.transcript.push(TranscriptEntry::User(text.to_string()));
-        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
+        let context = self.turn_context();
 
         let mut agent = self.agent_slot.take().expect("agent available");
         let mut executor = QueryToolExecutor {
@@ -425,10 +727,12 @@ impl App {
             schema: self.schema.clone(),
             approver,
             last_result: None,
+            last_byte_columns: Vec::new(),
         };
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = agent.run_turn(text, &catalog, &mut executor, &mut (), &cancel).await;
+        let result = agent.run_turn(text, &context, &mut executor, &mut (), &cancel).await;
         let exec_last = executor.last_result.take();
+        let exec_byte_cols = std::mem::take(&mut executor.last_byte_columns);
         self.agent_slot = Some(agent);
 
         let turn = result?;
@@ -439,6 +743,7 @@ impl App {
                 capped.rows.truncate(self.row_cap);
             }
             self.last_result = Some(capped);
+            self.last_byte_columns = exec_byte_cols;
         }
         self.transcript.push(TranscriptEntry::Agent(turn.answer));
         Ok(())
@@ -464,10 +769,11 @@ impl App {
         }
         self.transcript.push(TranscriptEntry::User(text.to_string()));
         self.streaming_idx = None;
+        self.selected_step = None;
         self.live = crate::live::LiveState::new(self.max_iterations);
         self.live.running = true;
 
-        let catalog = self.schema.as_ref().map(|s| s.compact_catalog()).unwrap_or_default();
+        let context = self.turn_context();
         // Safe: `can_start_turn` guaranteed the slot is full above.
         let mut agent = self.agent_slot.take().expect("agent available");
 
@@ -492,15 +798,18 @@ impl App {
                 schema,
                 approver: &mut approver,
                 last_result: None,
+                last_byte_columns: Vec::new(),
             };
             let result = agent
-                .run_turn(&input, &catalog, &mut executor, &mut observer, &cancel_task)
+                .run_turn(&input, &context, &mut executor, &mut observer, &cancel_task)
                 .await;
             let last_result = executor.last_result.take();
+            let last_byte_columns = std::mem::take(&mut executor.last_byte_columns);
             crate::turn::TurnOutput {
                 agent,
                 result,
                 last_result,
+                last_byte_columns,
             }
         });
 
@@ -572,6 +881,7 @@ impl App {
                         capped.rows.truncate(self.row_cap);
                     }
                     self.last_result = Some(capped);
+                    self.last_byte_columns = out.last_byte_columns;
                 }
                 match out.result {
                     Ok(turn) => {
@@ -620,6 +930,7 @@ impl App {
                     rows,
                     rows_affected: None,
                 });
+                self.last_byte_columns = Vec::new();
             } else {
                 // Live introspect.
                 let mut db = self.db.lock().await;
@@ -635,6 +946,7 @@ impl App {
                         let text = format_result_text(&result);
                         self.transcript.push(TranscriptEntry::Info(text));
                         self.last_result = Some(result);
+                        self.last_byte_columns = Vec::new();
                     },
                     Err(e) => {
                         self.transcript.push(TranscriptEntry::Error(e.to_string()));
@@ -671,6 +983,12 @@ impl App {
 
     pub async fn handle_tool_command(&mut self, cmd: &str, approver: &mut dyn Approver) -> Result<(), AppError> {
         let cmd = cmd.trim();
+
+        // Bare `/` or `/help` shows the command reference.
+        if cmd.is_empty() || cmd == "help" {
+            self.transcript.push(TranscriptEntry::Info(naque_tui::help_text()));
+            return Ok(());
+        }
 
         if let Some(rest) = cmd.strip_prefix("mode ") {
             match rest.trim().parse::<PermissionMode>() {
@@ -755,6 +1073,45 @@ impl App {
             return Ok(());
         }
 
+        if cmd == "context" || cmd.starts_with("context ") {
+            let Some(store) = self.store.clone() else {
+                self.transcript
+                    .push(TranscriptEntry::Info("no active profile; use /save first".into()));
+                return Ok(());
+            };
+            let Some(profile) = self.active_profile.clone() else {
+                self.transcript
+                    .push(TranscriptEntry::Info("no active profile; use /save first".into()));
+                return Ok(());
+            };
+            let path = store.context_path(&profile);
+            let note = cmd.strip_prefix("context").map(str::trim).unwrap_or("");
+            if note.is_empty() {
+                match std::fs::read_to_string(&path) {
+                    Ok(doc) => {
+                        self.active_context = Some(doc.clone());
+                        self.transcript.push(TranscriptEntry::Info(doc));
+                    },
+                    Err(_) => self
+                        .transcript
+                        .push(TranscriptEntry::Info("no context saved for this profile".into())),
+                }
+            } else {
+                let current = std::fs::read_to_string(&path).unwrap_or_default();
+                let updated = naque_schema::append_note(&current, note);
+                std::fs::write(&path, &updated).map_err(|e| AppError::Other(e.to_string()))?;
+                self.active_context = Some(updated);
+                self.transcript.push(TranscriptEntry::Info("note added to context".into()));
+            }
+            return Ok(());
+        }
+
+        if cmd == "save" || cmd.starts_with("save ") {
+            return self
+                .save_profile_command(cmd.strip_prefix("save").map(str::trim).unwrap_or(""))
+                .await;
+        }
+
         // Silence the unused parameter warning in the non-NL paths.
         let _ = approver;
 
@@ -784,6 +1141,237 @@ impl App {
         }
         Ok(())
     }
+
+    /// Headless `/save` orchestrator. Composes the granular pieces below so the
+    /// interactive (spinner) path in `ui.rs` can drive the same slow phases as
+    /// owned futures while redrawing frames.
+    async fn save_profile_command(&mut self, args: &str) -> Result<(), AppError> {
+        let Some((profile, env)) = self.resolve_save_target(args) else {
+            return Ok(());
+        };
+        if self.schema.is_none() {
+            match self.introspect_future().await {
+                Ok(model) => {
+                    let n = model.tables.len();
+                    self.set_schema(model);
+                    self.push_info(format!("learned {n} table(s)"));
+                },
+                Err(e) => {
+                    self.transcript.push(TranscriptEntry::Error(format!("learn failed: {e}")));
+                    return Ok(());
+                },
+            }
+        }
+        let Some(schema_md) = self.schema_markdown_current() else {
+            self.transcript
+                .push(TranscriptEntry::Error("no schema to save; connect and /learn first".into()));
+            return Ok(());
+        };
+        let (agent, outcome) = self.overview_future(schema_md).await;
+        self.restore_agent(agent);
+        if let Some(err) = outcome.error {
+            self.push_info(format!("overview generation failed: {err}"));
+        }
+        self.finish_save(&profile, &env, &outcome.text)
+    }
+
+    /// Parse `/save` args into `(profile, env)`. On the no-args-and-no-active
+    /// case, push the usage hint and return `None`.
+    pub(crate) fn resolve_save_target(&mut self, args: &str) -> Option<(String, String)> {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        match parts.as_slice() {
+            [] => match (&self.active_profile, &self.active_env) {
+                (Some(p), Some(e)) => Some((p.clone(), e.clone())),
+                _ => {
+                    self.push_info("usage: /save <profile> [env] (no active profile to update)");
+                    None
+                },
+            },
+            [p] => Some((p.to_string(), "default".to_string())),
+            [p, e, ..] => Some((p.to_string(), e.to_string())),
+        }
+    }
+
+    /// Owned schema-introspection future. Clones the `Arc<Mutex<Database>>` so
+    /// the future is `'static` and does not borrow `self`, letting a concurrent
+    /// spinner draw borrow `&App`.
+    pub(crate) fn introspect_future(
+        &self,
+    ) -> impl std::future::Future<Output = Result<naque_schema::SchemaModel, naque_schema::SchemaError>> + 'static {
+        let db = Arc::clone(&self.db);
+        async move { naque_schema::introspect(&mut *db.lock().await).await }
+    }
+
+    pub(crate) fn schema_markdown_current(&self) -> Option<String> {
+        self.schema.as_ref().map(naque_schema::schema_markdown)
+    }
+
+    /// Owned overview-generation future. Takes the agent out of its slot and
+    /// returns it back out so the caller can restore it; the future owns the
+    /// agent + schema markdown and is `'static`.
+    pub(crate) fn overview_future(
+        &mut self,
+        schema_md: String,
+    ) -> impl std::future::Future<Output = (Option<Agent>, OverviewOutcome)> + 'static {
+        let agent = self.agent_slot.take();
+        let db = Arc::clone(&self.db);
+        async move {
+            let engine = db.lock().await.engine();
+            let system = overview_system_prompt(engine);
+            let outcome = match agent.as_ref() {
+                Some(a) => match a.complete_once(&system, &schema_md).await {
+                    Ok(t) if !t.trim().is_empty() => OverviewOutcome { text: t, error: None },
+                    Ok(_) => OverviewOutcome {
+                        text: "(overview unavailable: empty response)".into(),
+                        error: None,
+                    },
+                    Err(e) => OverviewOutcome {
+                        text: "(overview unavailable)".into(),
+                        error: Some(e.to_string()),
+                    },
+                },
+                None => OverviewOutcome {
+                    text: "(overview unavailable: no agent)".into(),
+                    error: None,
+                },
+            };
+            (agent, outcome)
+        }
+    }
+
+    pub(crate) fn restore_agent(&mut self, agent: Option<Agent>) {
+        self.agent_slot = agent;
+    }
+
+    // --- Step selection + expansion ----------------------------------------
+
+    /// Transcript indices that are tool steps, oldest first.
+    pub(crate) fn tool_step_indices(&self) -> Vec<usize> {
+        self.transcript
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, TranscriptEntry::ToolStep { .. }))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Move the selection toward older tool steps (ctrl+↑). Enters at the newest
+    /// step from the unselected state; clamps at the oldest.
+    pub fn select_prev_step(&mut self) {
+        let steps = self.tool_step_indices();
+        let Some(&last) = steps.last() else { return };
+        self.selected_step = Some(match self.selected_step {
+            None => last,
+            Some(cur) => match steps.iter().position(|&i| i == cur) {
+                Some(0) | None => steps[0],
+                Some(pos) => steps[pos - 1],
+            },
+        });
+    }
+
+    /// Move the selection toward newer tool steps (ctrl+↓). Moving past the
+    /// newest returns to the unselected (tail-following) state.
+    pub fn select_next_step(&mut self) {
+        let steps = self.tool_step_indices();
+        let Some(cur) = self.selected_step else { return };
+        self.selected_step = match steps.iter().position(|&i| i == cur) {
+            Some(pos) if pos + 1 < steps.len() => Some(steps[pos + 1]),
+            _ => None,
+        };
+    }
+
+    /// Toggle expansion of the selected step, or the newest step when nothing is
+    /// selected (ctrl+r).
+    pub fn toggle_selected_step(&mut self) {
+        let target = self.selected_step.or_else(|| self.tool_step_indices().last().copied());
+        if let Some(i) = target
+            && !self.expanded_steps.remove(&i)
+        {
+            self.expanded_steps.insert(i);
+        }
+    }
+
+    /// Clear the step selection and resume tail-follow (manual scroll / ctrl+end).
+    pub fn clear_step_selection(&mut self) {
+        self.selected_step = None;
+    }
+
+    /// Synchronous tail of `/save`: persist the (secret-stripped) connection,
+    /// the schema, and the assembled context, then update active state.
+    pub(crate) fn finish_save(&mut self, profile: &str, env: &str, overview: &str) -> Result<(), AppError> {
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| AppError::Other("profile store unavailable".into()))?;
+        let Some(model) = self.schema.clone() else {
+            self.transcript
+                .push(TranscriptEntry::Error("no schema to save; connect and /learn first".into()));
+            return Ok(());
+        };
+
+        let mut spec = self.active_connection.clone().unwrap_or_default();
+        let stripped_secret = spec.password.take().is_some();
+        if let Some(u) = &spec.url {
+            let (red, had) = naque_profile::strip_url_password(u);
+            spec.url = Some(red);
+            if had {
+                self.transcript.push(TranscriptEntry::Info(format!(
+                    "connection saved without its password — add password_env/password_keyring to [environments.{env}] in {}",
+                    store.profile_dir(profile).join("profile.toml").display()
+                )));
+            }
+        }
+        let mut stripped_param = false;
+        if let Some(params) = spec.params.as_mut() {
+            let before = params.len();
+            params.retain(|k, _| !k.to_ascii_lowercase().contains("password"));
+            stripped_param = params.len() != before;
+            if params.is_empty() {
+                spec.params = None;
+            }
+        }
+        if stripped_secret || stripped_param {
+            self.transcript
+                .push(TranscriptEntry::Info("secret values not persisted; use password_env/password_keyring".into()));
+        }
+
+        let mut loaded = store
+            .load_profile(profile)
+            .map_err(|e| AppError::Other(e.to_string()))?
+            .unwrap_or_default();
+        loaded.environments.insert(env.to_string(), spec.clone());
+        if loaded.default_environment.is_none() {
+            loaded.default_environment = Some(env.to_string());
+        }
+        store
+            .save_profile(profile, &loaded)
+            .map_err(|e| AppError::Other(e.to_string()))?;
+
+        naque_schema::save_schema(&store.profile_dir(profile), &model).map_err(|e| AppError::Other(e.to_string()))?;
+
+        let schema_md = naque_schema::schema_markdown(&model);
+        let prior = std::fs::read_to_string(store.context_path(profile)).unwrap_or_default();
+        let notes = naque_schema::extract_notes(&prior);
+        let doc = naque_schema::assemble(profile, &schema_md, overview, &notes);
+        std::fs::write(store.context_path(profile), &doc).map_err(|e| AppError::Other(e.to_string()))?;
+
+        self.active_profile = Some(profile.to_string());
+        self.active_env = Some(env.to_string());
+        self.active_connection = Some(spec);
+        self.active_context = Some(doc);
+        self.profile_name = profile.to_string();
+        self.transcript
+            .push(TranscriptEntry::Info(format!("saved profile {profile}/{env}")));
+        Ok(())
+    }
+}
+
+/// Result of an overview-generation attempt. `error` carries the failure
+/// message (non-fatal) so the caller can surface it while `text` always holds
+/// usable content (a placeholder on failure).
+pub(crate) struct OverviewOutcome {
+    pub text: String,
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -803,7 +1391,7 @@ fn engine_dialect(engine: Engine) -> SqlDialect {
 
 #[cfg(test)]
 pub mod tests {
-    use naque_llm::{AgentConfig, LlmResponse, MockProvider, ToolCall, Usage as LlmUsage};
+    use naque_llm::{AgentConfig, LlmResponse, MockProvider, ToolCall, Usage};
 
     use super::*;
     use crate::ApprovalDecision;
@@ -995,7 +1583,7 @@ pub mod tests {
                 name: "run_query".to_string(),
                 input: serde_json::json!({ "sql": "SELECT * FROM t" }),
             }],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
             },
@@ -1004,7 +1592,7 @@ pub mod tests {
         let resp2 = LlmResponse {
             text: Some("done".to_string()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 8,
                 output_tokens: 3,
             },
@@ -1030,6 +1618,53 @@ pub mod tests {
         assert!(app.usage().input_tokens > 0, "cumulative usage should be > 0");
     }
 
+    #[tokio::test]
+    async fn agent_turn_propagates_byte_columns() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+
+        // Set up a table with a byte-count column and one row.
+        let mut setup = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        setup
+            .handle_line("!CREATE TABLE t(id INTEGER, sz INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        setup
+            .handle_line("!INSERT INTO t VALUES (1, 4500000000)", &mut AutoApprove)
+            .await
+            .unwrap();
+        drop(setup);
+
+        // Agent fires run_query tagging `sz` as a byte column, then answers.
+        let resp1 = LlmResponse {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "tc1".to_string(),
+                name: "run_query".to_string(),
+                input: serde_json::json!({ "sql": "SELECT id, sz FROM t", "byte_count_columns": ["sz"] }),
+            }],
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            stop_reason: "tool_use".to_string(),
+        };
+        let resp2 = LlmResponse {
+            text: Some("done".to_string()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 8,
+                output_tokens: 3,
+            },
+            stop_reason: "end_turn".to_string(),
+        };
+
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![resp1, resp2]).await;
+        app.handle_natural_language("show t sizes", &mut AutoApprove).await.unwrap();
+
+        assert_eq!(app.last_byte_columns(), &[1], "agent-tagged byte column 'sz' (index 1) must propagate to the app");
+    }
+
     // ------------------------------------------------------------------
     // Test 6: tool commands and mode switching
     // ------------------------------------------------------------------
@@ -1039,6 +1674,14 @@ pub mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let url = format!("sqlite:{}", tmp.path().display());
         let mut app = make_app(&url, PermissionMode::Default, vec![]).await;
+
+        // /help — lists the slash commands.
+        app.handle_line("/help", &mut AutoApprove).await.unwrap();
+        let has_help = app
+            .transcript()
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::Info(s) if s.contains("Slash commands:") && s.contains("/mode")));
+        assert!(has_help, "transcript should contain the help listing");
 
         // /mode readonly
         app.handle_line("/mode readonly", &mut AutoApprove).await.unwrap();
@@ -1066,6 +1709,61 @@ pub mod tests {
         assert!(app.should_quit());
     }
 
+    #[test]
+    fn mode_guidance_describes_each_mode() {
+        assert!(mode_guidance(PermissionMode::Wildcard, false).contains("WILDCARD"));
+        assert!(
+            mode_guidance(PermissionMode::Wildcard, false)
+                .to_ascii_lowercase()
+                .contains("insert")
+        );
+        assert!(mode_guidance(PermissionMode::ReadOnly, false).contains("READ-ONLY"));
+        assert!(mode_guidance(PermissionMode::Default, false).contains("DEFAULT"));
+        assert!(mode_guidance(PermissionMode::Strict, false).contains("STRICT"));
+    }
+
+    #[test]
+    fn mode_guidance_notes_guard_only_in_wildcard() {
+        assert!(
+            mode_guidance(PermissionMode::Wildcard, true)
+                .to_ascii_lowercase()
+                .contains("confirm")
+        );
+        assert!(
+            !mode_guidance(PermissionMode::Wildcard, false)
+                .to_ascii_lowercase()
+                .contains("confirm")
+        );
+    }
+
+    /// Regression: switching mode via `/mode` must change what the agent is
+    /// told each turn, so it stops refusing writes after going to wildcard.
+    #[tokio::test]
+    async fn turn_context_tracks_mode_changes() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::ReadOnly, vec![]).await;
+        assert!(app.turn_context().contains("READ-ONLY"));
+
+        app.handle_line("/mode wildcard", &mut AutoApprove).await.unwrap();
+        assert!(
+            app.turn_context().contains("WILDCARD"),
+            "after /mode wildcard the agent context must say WILDCARD, got: {}",
+            app.turn_context()
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_context_uses_active_context_when_present() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        app.active_context = Some("## Schema\n\n### orders\n- id bigint".to_string());
+        let ctx = app.turn_context();
+        assert!(ctx.contains("WILDCARD"), "mode line still present");
+        assert!(ctx.contains("### orders"), "active context fed");
+    }
+
     // ------------------------------------------------------------------
     // Test 7: /learn populates schema with table name
     // ------------------------------------------------------------------
@@ -1090,8 +1788,62 @@ pub mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Test 3.4: Secret-isolation regression
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn turn_context_never_contains_connection_secrets() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        app.active_connection = Some(naque_profile::ConnectionSpec {
+            host: Some("h".into()),
+            user: Some("u".into()),
+            password: Some("TOP_SECRET_PW".into()),
+            password_env: Some("PROD_PW".into()),
+            ..Default::default()
+        });
+        app.active_context = Some("## Schema\n\n### orders\n- id bigint".into());
+        let ctx = app.turn_context();
+        assert!(!ctx.contains("TOP_SECRET_PW"));
+        assert!(!ctx.contains("PROD_PW"));
+        assert!(!ctx.contains("password"));
+    }
+
+    // ------------------------------------------------------------------
     // Test 8: AcceptEdited re-gates and runs the new SQL
     // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn context_command_shows_and_appends_notes() {
+        use naque_profile::{Profile, Store};
+        let home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+
+        let store = Store::open(home.path());
+        store.save_profile("shop", &Profile::default()).unwrap();
+        std::fs::write(store.context_path("shop"), naque_schema::assemble("shop", "### t", "ov", "first note"))
+            .unwrap();
+        app.set_active_profile(store.clone(), Some("shop".into()), Some("dev".into()), None);
+        app.active_context = std::fs::read_to_string(store.context_path("shop")).ok();
+
+        app.handle_line("/context the orders table is append-only", &mut AutoApprove)
+            .await
+            .unwrap();
+        let on_disk = std::fs::read_to_string(store.context_path("shop")).unwrap();
+        assert!(on_disk.contains("first note"));
+        assert!(on_disk.contains("append-only"));
+        assert!(app.active_context.as_ref().unwrap().contains("append-only"));
+
+        app.handle_line("/context", &mut AutoApprove).await.unwrap();
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::Info(s) if s.contains("append-only")))
+        );
+    }
 
     #[tokio::test]
     async fn accept_edited_reruns_new_sql() {
@@ -1123,11 +1875,330 @@ pub mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Some("1".to_string()));
     }
+
+    // ------------------------------------------------------------------
+    // Task 4.2: /save command
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn save_writes_profile_schema_and_context_by_reference() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+
+        let overview = LlmResponse {
+            text: Some("Two tables: orders and users.".into()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 5,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![overview]).await;
+        app.handle_line("!CREATE TABLE orders(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        app.set_active_profile(
+            Store::open(home.path()),
+            None,
+            None,
+            Some(naque_profile::ConnectionSpec {
+                engine: Some(naque_profile::ProfileEngine::Sqlite),
+                path: Some(dbf.path().display().to_string()),
+                password_env: Some("UNUSED".into()),
+                ..Default::default()
+            }),
+        );
+
+        app.handle_line("/save shop dev", &mut AutoApprove).await.unwrap();
+
+        let store = Store::open(home.path());
+        let saved = store.load_profile("shop").unwrap().unwrap();
+        assert!(saved.environments.contains_key("dev"));
+        let toml_text = std::fs::read_to_string(store.profile_dir("shop").join("profile.toml")).unwrap();
+        assert!(!toml_text.contains("password ="), "no plaintext password persisted: {toml_text}");
+        assert!(store.profile_dir("shop").join("schema.json").is_file());
+        let ctx = std::fs::read_to_string(store.context_path("shop")).unwrap();
+        assert!(ctx.contains("## Overview"));
+        assert!(ctx.contains("Two tables"));
+        assert!(ctx.contains("orders"));
+    }
+
+    #[tokio::test]
+    async fn save_restores_agent_after_overview() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+        let overview = LlmResponse {
+            text: Some("An overview.".into()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 5,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![overview]).await;
+        app.handle_line("!CREATE TABLE orders(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        app.set_active_profile(Store::open(home.path()), None, None, Some(Default::default()));
+
+        assert!(app.agent_slot.is_some(), "agent present before save");
+        app.handle_line("/save shop dev", &mut AutoApprove).await.unwrap();
+        assert!(app.agent_slot.is_some(), "agent must be restored after overview generation");
+    }
+
+    #[tokio::test]
+    async fn resolve_save_target_arms() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+
+        assert_eq!(app.resolve_save_target("shop"), Some(("shop".into(), "default".into())));
+        assert_eq!(app.resolve_save_target("shop dev"), Some(("shop".into(), "dev".into())));
+
+        app.active_profile = Some("active".into());
+        app.active_env = Some("prod".into());
+        assert_eq!(app.resolve_save_target(""), Some(("active".into(), "prod".into())));
+
+        app.active_profile = None;
+        app.active_env = None;
+        assert_eq!(app.resolve_save_target(""), None);
+    }
+
+    #[tokio::test]
+    async fn save_defaults_env_to_default_and_no_args_uses_active() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+        let ov = LlmResponse {
+            text: Some("ov".into()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let ov2 = LlmResponse {
+            text: Some("ov2".into()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![ov, ov2]).await;
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        app.set_active_profile(
+            Store::open(home.path()),
+            None,
+            None,
+            Some(naque_profile::ConnectionSpec {
+                engine: Some(naque_profile::ProfileEngine::Sqlite),
+                path: Some(dbf.path().display().to_string()),
+                ..Default::default()
+            }),
+        );
+
+        app.handle_line("/save shop", &mut AutoApprove).await.unwrap();
+        let store = Store::open(home.path());
+        assert!(
+            store
+                .load_profile("shop")
+                .unwrap()
+                .unwrap()
+                .environments
+                .contains_key("default")
+        );
+
+        assert_eq!(app.active_profile.as_deref(), Some("shop"));
+        assert_eq!(app.active_env.as_deref(), Some("default"));
+        app.handle_line("/save", &mut AutoApprove).await.unwrap();
+        assert!(store.load_profile("shop").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn list_environments_returns_saved_envs() {
+        use naque_profile::{ConnectionSpec, Profile, Store};
+        let home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        let store = Store::open(home.path());
+        let mut envs = std::collections::BTreeMap::new();
+        envs.insert("prod".to_string(), ConnectionSpec::default());
+        envs.insert("dev".to_string(), ConnectionSpec::default());
+        store
+            .save_profile(
+                "shop",
+                &Profile {
+                    environments: envs,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        app.set_active_profile(store, Some("shop".into()), None, None);
+        let mut got = app.list_environments("shop").unwrap();
+        got.sort();
+        assert_eq!(got, vec!["dev".to_string(), "prod".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn save_strips_password_from_params() {
+        use naque_profile::Store;
+        let home = tempfile::tempdir().unwrap();
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", dbf.path().display());
+        let ov = LlmResponse {
+            text: Some("ov".into()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![ov]).await;
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("/learn", &mut AutoApprove).await.unwrap();
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("password".to_string(), "PARAM_SECRET".to_string());
+        params.insert("sslmode".to_string(), "require".to_string());
+        app.set_active_profile(
+            Store::open(home.path()),
+            None,
+            None,
+            Some(naque_profile::ConnectionSpec {
+                engine: Some(naque_profile::ProfileEngine::Sqlite),
+                path: Some(dbf.path().display().to_string()),
+                params: Some(params),
+                ..Default::default()
+            }),
+        );
+        app.handle_line("/save shop dev", &mut AutoApprove).await.unwrap();
+        let store = Store::open(home.path());
+        let toml_text = std::fs::read_to_string(store.profile_dir("shop").join("profile.toml")).unwrap();
+        assert!(!toml_text.contains("PARAM_SECRET"), "password param must be stripped: {toml_text}");
+        assert!(toml_text.contains("sslmode"), "non-secret params preserved");
+    }
+
+    fn running_step(name: &str) -> TranscriptEntry {
+        TranscriptEntry::ToolStep {
+            name: name.into(),
+            detail: Some("SELECT 1".into()),
+            status: StepStatus::Running,
+            summary: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn step_selection_navigates_and_toggles() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        {
+            let t = app.transcript_mut();
+            t.push(TranscriptEntry::User("q".into())); // 0
+            t.push(running_step("a")); // 1
+            t.push(TranscriptEntry::Reasoning("r".into())); // 2
+            t.push(running_step("b")); // 3
+            t.push(running_step("c")); // 4
+        }
+        assert_eq!(app.selected_step, None);
+
+        // ctrl+up walks newest -> oldest, clamping at the oldest tool step.
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(4));
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(3));
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(1));
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(1), "clamps at oldest");
+
+        // ctrl+down walks back toward newest, then off the end to None.
+        app.select_next_step();
+        assert_eq!(app.selected_step, Some(3));
+        app.select_next_step();
+        assert_eq!(app.selected_step, Some(4));
+        app.select_next_step();
+        assert_eq!(app.selected_step, None, "past newest returns to tail-follow");
+
+        // toggle with no selection targets the newest step (index 4).
+        app.toggle_selected_step();
+        assert!(app.expanded_steps.contains(&4));
+        app.toggle_selected_step();
+        assert!(!app.expanded_steps.contains(&4));
+
+        // toggle acts on the selected step.
+        app.select_prev_step(); // 4
+        app.select_prev_step(); // 3
+        app.toggle_selected_step();
+        assert!(app.expanded_steps.contains(&3));
+
+        // manual scroll clears the selection.
+        app.clear_step_selection();
+        assert_eq!(app.selected_step, None);
+    }
+
+    #[tokio::test]
+    async fn start_turn_resets_selection_keeps_expanded() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let resp = LlmResponse {
+            text: Some("done".into()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![resp]).await;
+        app.transcript_mut().push(running_step("a")); // index 0
+        app.select_prev_step();
+        app.expanded_steps.insert(0);
+
+        app.start_turn("hi");
+
+        assert_eq!(app.selected_step, None, "start_turn clears the selection");
+        assert!(app.expanded_steps.contains(&0), "expanded steps are preserved");
+    }
+
+    #[tokio::test]
+    async fn raw_sql_clears_byte_columns() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+
+        app.handle_line("!CREATE TABLE t(id INTEGER)", &mut AutoApprove).await.unwrap();
+        app.handle_line("!INSERT INTO t VALUES (1)", &mut AutoApprove).await.unwrap();
+
+        // Simulate a stale byte-column tag from a prior agent turn.
+        app.last_byte_columns = vec![0];
+
+        app.handle_line("!SELECT * FROM t", &mut AutoApprove).await.unwrap();
+
+        assert!(
+            app.last_byte_columns().is_empty(),
+            "raw SQL results carry no LLM byte-column determination and must clear stale tags"
+        );
+    }
 }
 
 #[cfg(test)]
 mod spawn_tests {
-    use naque_llm::{AgentEvent, LlmResponse, Usage as LlmUsage};
+    use naque_llm::{AgentEvent, LlmResponse, Usage};
 
     use super::*;
 
@@ -1138,7 +2209,7 @@ mod spawn_tests {
         let resp = LlmResponse {
             text: Some("hello".into()),
             tool_calls: vec![],
-            usage: LlmUsage {
+            usage: Usage {
                 input_tokens: 4,
                 output_tokens: 2,
             },
@@ -1183,5 +2254,58 @@ mod spawn_tests {
         app.start_turn("hi"); // must NOT panic
         assert!(!app.is_turn_running());
         assert!(app.transcript().iter().any(|e| matches!(e, TranscriptEntry::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn switch_to_reconnects_and_loads_schema_context() {
+        use naque_profile::{ConnectionSpec, Profile, ProfileEngine, Store};
+
+        use crate::approval::AutoApprove;
+
+        let home = tempfile::tempdir().unwrap();
+        let prod_db = tempfile::NamedTempFile::new().unwrap();
+        let dev_db = tempfile::NamedTempFile::new().unwrap();
+
+        let prod_url = format!("sqlite:{}", prod_db.path().display());
+        let mut app = tests::make_app(&prod_url, PermissionMode::Wildcard, vec![]).await;
+
+        let store = Store::open(home.path());
+        let spec = |p: &std::path::Path| ConnectionSpec {
+            engine: Some(ProfileEngine::Sqlite),
+            path: Some(p.display().to_string()),
+            ..Default::default()
+        };
+        let mut envs = std::collections::BTreeMap::new();
+        envs.insert("prod".to_string(), spec(prod_db.path()));
+        envs.insert("dev".to_string(), spec(dev_db.path()));
+        let profile = Profile {
+            default_environment: Some("dev".into()),
+            config: Default::default(),
+            environments: envs,
+        };
+        store.save_profile("shop", &profile).unwrap();
+        std::fs::write(store.context_path("shop"), "# shop — context\n\n## Schema\n\n### marker_table\n").unwrap();
+        app.set_active_profile(store.clone(), Some("shop".into()), Some("prod".into()), None);
+
+        // Mark the initial (prod) connection with a table that only exists there.
+        app.handle_line("!CREATE TABLE prod_only(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+
+        app.switch_to("shop", "dev").await.expect("switch");
+
+        app.handle_line("!CREATE TABLE dev_only(id INTEGER)", &mut AutoApprove)
+            .await
+            .unwrap();
+        assert_eq!(app.active_env.as_deref(), Some("dev"));
+        assert!(app.turn_context().contains("marker_table"));
+
+        // Prove the DB actually swapped to a distinct file: `prod_only` only
+        // exists on the prod file, so querying it on dev must error.
+        app.handle_line("!SELECT * FROM prod_only", &mut AutoApprove).await.ok();
+        assert!(
+            app.transcript().iter().any(|e| matches!(e, TranscriptEntry::Error(_))),
+            "prod_only must be absent on dev (different DB)"
+        );
     }
 }

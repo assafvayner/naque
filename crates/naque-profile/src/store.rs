@@ -8,6 +8,7 @@ use crate::{ConfigError, NaqueFile};
 ///
 /// The directory need not exist when `Store::open` is called; call
 /// `ensure_dirs` before writing.
+#[derive(Clone)]
 pub struct Store {
     home: PathBuf,
 }
@@ -37,6 +38,21 @@ impl Store {
     /// Path to the cache directory: `<home>/cache`.
     pub fn cache_dir(&self) -> PathBuf {
         self.home.join("cache")
+    }
+
+    /// `<home>/profiles` — the per-profile directory root.
+    pub fn profiles_dir(&self) -> PathBuf {
+        self.home.join("profiles")
+    }
+
+    /// `<home>/profiles/<name>` — one profile's directory.
+    pub fn profile_dir(&self, name: &str) -> PathBuf {
+        self.profiles_dir().join(name)
+    }
+
+    /// `<home>/profiles/<name>/context.md`.
+    pub fn context_path(&self, name: &str) -> PathBuf {
+        self.profile_dir(name).join("context.md")
     }
 
     /// Create `<home>/` and `<home>/cache/` if they do not already exist.
