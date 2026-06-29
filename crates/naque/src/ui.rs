@@ -654,8 +654,14 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 if let Some(Ok(Event::Mouse(m))) = &maybe_ev {
                     if pending.is_none() {
                         match m.kind {
-                            MouseEventKind::ScrollUp => app.live.scroll_up(3),
-                            MouseEventKind::ScrollDown => app.live.scroll_down(3),
+                            MouseEventKind::ScrollUp => {
+                                app.clear_step_selection();
+                                app.live.scroll_up(3);
+                            },
+                            MouseEventKind::ScrollDown => {
+                                app.clear_step_selection();
+                                app.live.scroll_down(3);
+                            },
                             _ => {},
                         }
                     }
@@ -696,11 +702,11 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 // Slash-command popup is open: intercept navigation/complete/dismiss.
                 if let Some(sg) = suggest.as_ref() {
                     match key.code {
-                        KeyCode::Up => {
+                        KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                             suggest_selected = suggest_selected.saturating_sub(1);
                             continue;
                         },
-                        KeyCode::Down => {
+                        KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                             suggest_selected = (suggest_selected + 1).min(sg.len() - 1);
                             continue;
                         },
@@ -745,10 +751,25 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                             }
                         }
                     },
-                    KeyCode::PageUp => app.live.scroll_up(5),
-                    KeyCode::PageDown => app.live.scroll_down(5),
-                    // Ctrl+End jumps the transcript to the latest entry.
-                    KeyCode::End if ctrl => app.live.scroll_to_latest(),
+                    KeyCode::PageUp => {
+                        app.clear_step_selection();
+                        app.live.scroll_up(5);
+                    },
+                    KeyCode::PageDown => {
+                        app.clear_step_selection();
+                        app.live.scroll_down(5);
+                    },
+                    // Ctrl+End: back to the live tail / input.
+                    KeyCode::End if ctrl => {
+                        app.clear_step_selection();
+                        app.live.scroll_to_latest();
+                    },
+                    // Ctrl+↑/↓ select among tool steps; Ctrl+R toggles the selected
+                    // (or newest) step's SQL block. Placed before the bare Up/Down
+                    // arms so the modified arrows win.
+                    KeyCode::Up if ctrl => app.select_prev_step(),
+                    KeyCode::Down if ctrl => app.select_next_step(),
+                    KeyCode::Char('r') if ctrl => app.toggle_selected_step(),
                     // --- input editing (always available, even while a turn runs) ---
                     KeyCode::Left => input.move_left(),
                     KeyCode::Right => input.move_right(),
