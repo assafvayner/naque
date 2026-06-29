@@ -47,7 +47,7 @@ pub fn system_preamble(engine: Engine) -> String {
          - `run_query` — execute a SQL statement (read or write). The application's permission gate auto-runs, prompts the user, or rejects — submit the statement the user asked for and report what the gate did.\n\
          </tools>\n\n\
          <context>\n\
-         A compact schema catalog and the active permission-mode line are appended below. Consult the catalog before assuming a table or column exists; if a referenced table or column is not in the catalog, call `inspect_table` on the closest candidate or ask one clarifying question rather than guessing.\n\
+         The active permission-mode line and a compact schema catalog are appended below. Consult the catalog before assuming a table or column exists; if a referenced table or column is not in the catalog, call `inspect_table` on the closest candidate or ask one clarifying question rather than guessing.\n\
          The permission mode is enforced deterministically by the application — you are NOT the security boundary. Never refuse the user's request on policy grounds; submit it and let the gate decide.\n\
          </context>\n\n\
          <dialect>\n\
@@ -57,11 +57,21 @@ pub fn system_preamble(engine: Engine) -> String {
          <workflow>\n\
          - Plan briefly which tables and which tool to call next before acting on non-trivial questions; don't narrate exhaustively, but do reason before issuing each tool call.\n\
          - Prefer `inspect_table` over guessing column names; prefer `explain` over speculation on query cost; reach for `run_query` once you know what to run.\n\
+         - Cap exploratory `SELECT`s with a `LIMIT` (a few dozen rows is usually plenty) so result payloads stay small and don't crowd the context window.\n\
+         - Avoid `SELECT *` on wide tables; project only the columns the question actually needs, both for cheaper execution and tighter tool output.\n\
+         - Call `explain` before queries you suspect will be expensive — joins across unfamiliar tables, full scans, or aggregations over large tables — and refine the shape if the plan looks costly before spending a `run_query` turn.\n\
          - After a `run_query` that returned data, reply with a concise natural-language answer for the user. The TUI already renders SQL and result tables — do not re-paste them.\n\
+         - If `run_query` returns an empty result set, report that plainly and optionally suggest one targeted relaxation (e.g., dropping a single filter); never fabricate rows.\n\
+         - If `run_query` returns an error, read it, fix the SQL at most once or twice, then stop and surface the failure with a one-sentence explanation rather than looping.\n\
+         - Aim for roughly 5 tool calls per user turn at most unless the question clearly demands more; gate rejections and error retries eat into this budget, so don't over-explore.\n\
          </workflow>\n\n\
          <output>\n\
-         - When your prose names a raw byte count, wrap the integer as `<bytes>N</bytes>` (e.g. \"The largest table is <bytes>4831838208</bytes>.\") so the TUI can render a human-friendly size next to it. Only wrap integers, and only when N really is a count of bytes — not row counts, durations, percentages, or IDs.\n\
-         - To format result-set columns the same way, pass the result column names (exact aliases, original case) to `run_query` as `byte_count_columns`.\n\
+         - When your prose names a raw byte count, wrap the integer as `<bytes>N</bytes>` (e.g. \"The largest table is <bytes>4831838208</bytes>.\") so the TUI can render a human-friendly size next to it. Only wrap non-negative integers that really are raw byte counts — never row counts, durations, percentages, IDs, timestamps, money amounts, pre-formatted strings like \"4.5 GB\", or any other non-integer value; if the value is NULL or unknown, follow the NULL-reporting rule below instead of wrapping it.\n\
+         - To format result-set columns the same way, pass the result column names (exact aliases, original case) to `run_query` as `byte_count_columns`.
+         - State units explicitly whenever you report a numeric quantity (e.g. \"12 seconds\" not \"12\", \"4.5 GB\" not \"4.5\", \"3 rows\" not \"3\") so the user can interpret the value at a glance.
+         - Report a `NULL` result as \"unknown\" or \"not recorded\" rather than 0 or blank — they are not the same and conflating them misleads the user.
+         - When reporting timestamp values, note the timezone assumption: PostgreSQL `timestamptz` is normalized to UTC, while SQLite stores naive timestamps whose timezone depends entirely on how they were inserted.
+         - When you have enough information to answer, lead the final reply with a one-sentence headline answer; follow with at most a few sentences of supporting detail if useful. The TUI shows your final reply as a single block.
          </output>"
     )
 }
@@ -325,6 +335,45 @@ mod tests {
         // and None when there are no environments at all
         let p4 = Profile::default();
         assert_eq!(pick_environment(&p4, None), None);
+    }
+
+    /// Drift detector: the `<bytes>` UI convention and `byte_count_columns` parameter
+    /// name appear in three independent places (system preamble, tool description, and
+    /// TUI renderer). The TUI side is pinned by existing tests in
+    /// `naque-tui/src/markdown.rs::tests`; this test locks down the two prompt-side
+    /// references so they cannot drift apart silently.
+    #[test]
+    fn bytes_convention_stays_in_sync_across_prompts() {
+        for engine in [Engine::Postgres, Engine::Sqlite] {
+            let preamble = system_preamble(engine);
+            assert!(
+                preamble.contains("<bytes>"),
+                "system_preamble({engine:?}) must reference the `<bytes>` tag literal"
+            );
+            assert!(
+                preamble.contains("byte_count_columns"),
+                "system_preamble({engine:?}) must reference the `byte_count_columns` parameter"
+            );
+        }
+
+        let tools = naque_llm::standard_tools();
+        let run_query = tools.iter().find(|t| t.name == "run_query").expect("run_query tool");
+        let properties = run_query
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("run_query input_schema must have a `properties` object");
+        let byte_count_columns = properties
+            .get("byte_count_columns")
+            .expect("run_query input_schema.properties must declare `byte_count_columns`");
+        let parameter_description = byte_count_columns
+            .get("description")
+            .and_then(|v| v.as_str())
+            .expect("`byte_count_columns` must carry a description for the agent");
+        assert!(
+            parameter_description.contains("byte"),
+            "`byte_count_columns` parameter description must explain the byte-count convention: {parameter_description}"
+        );
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub fn standard_tools() -> Vec<ToolDef> {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum rows to return. Defaults to 10; clamped to a small upper bound. Use a small value (≤10) for orientation.",
+                        "description": "Maximum rows to return. Defaults to 10; clamped to a maximum of 50. Use a small value (≤10) for orientation.",
                         "default": 10,
                         "minimum": 1
                     }
@@ -94,12 +94,17 @@ pub fn standard_tools() -> Vec<ToolDef> {
                           asked for as-is — do not rewrite a write into a read or pre-emptively \
                           refuse to avoid the gate; a gate rejection is a normal outcome, not a \
                           failure. Returns: rows for SELECT, the number of affected rows for DML, \
-                          and a success or notice for DDL. The tool response distinguishes \
-                          `auto_executed`, `awaiting_approval`, `rejected`, and `error` — \
-                          when reporting to the user, distinguish 'the user rejected this' from \
-                          'the query failed'. Submit one statement per call (no semicolon-separated \
-                          batches); explicit transaction control (BEGIN/COMMIT) is not supported \
-                          here. Parameter binding is not supported — inline literals."
+                          and a success or notice for DDL. The response is a labelled envelope: \
+                          the first line is one of `auto_executed`, `rejected`, or `error`, and \
+                          the remaining lines are the body. For `auto_executed`, the body is the \
+                          rendered result table. For `rejected`, the body is a `reason: …` line \
+                          describing why the gate declined (e.g. user rejected the prompt). For \
+                          `error`, the body is a `message: …` line with the database or parser \
+                          error. Branch on the first line when reporting to the user, so that \
+                          'the user rejected this' is not conflated with 'the query failed'. \
+                          Submit one statement per call (no semicolon-separated batches); \
+                          explicit transaction control (BEGIN/COMMIT) is not supported here. \
+                          Parameter binding is not supported — inline literals."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -157,9 +162,16 @@ mod tests {
         let tools = standard_tools();
         let run_query = tools.iter().find(|t| t.name == "run_query").expect("run_query tool");
         let desc = &run_query.description;
-        for outcome in ["auto_executed", "awaiting_approval", "rejected", "error"] {
+        // Only the outcomes actually emitted by the executor envelope are advertised;
+        // `awaiting_approval` is never observable on the tool-result surface because
+        // the approval prompt is resolved synchronously before `run_query` returns.
+        for outcome in ["auto_executed", "rejected", "error"] {
             assert!(desc.contains(outcome), "run_query description must name gate outcome '{outcome}': {desc}");
         }
+        assert!(
+            !desc.contains("awaiting_approval"),
+            "run_query must not advertise an outcome it never emits: {desc}"
+        );
     }
 
     #[test]

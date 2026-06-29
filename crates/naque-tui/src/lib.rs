@@ -20,7 +20,7 @@ pub use approval::{ApprovalChoice, ApprovalPrompt};
 pub use commands::{SLASH_COMMANDS, SlashCommand, help_text, matching};
 pub use history::History;
 pub use input::{Input, route_input};
-pub use input_line::{InputLine, InputView};
+pub use input_line::{InputLine, Wrapped};
 pub use logo::Logo;
 pub use markdown::render_markdown;
 pub use picker::{Picker, PickerOption, PickerOutcome};

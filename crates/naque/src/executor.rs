@@ -15,6 +15,11 @@ use tokio::sync::Mutex;
 use crate::approval::Approver;
 use crate::run_gated;
 
+/// Upper bound on rows returned by `sample_table`, matching the tool schema
+/// advertised to the LLM.
+const SAMPLE_TABLE_LIMIT_CAP: u32 = 50;
+const SAMPLE_TABLE_LIMIT_DEFAULT: u32 = 10;
+
 pub struct QueryToolExecutor<'a> {
     pub db: Arc<Mutex<Database>>,
     pub mode: naque_core::PermissionMode,
@@ -93,7 +98,16 @@ impl QueryToolExecutor<'_> {
             return Ok(format!("error: invalid table name {name:?}"));
         }
 
-        let limit = call.input.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).min(1000);
+        let requested = call
+            .input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::from(SAMPLE_TABLE_LIMIT_DEFAULT));
+        let limit = if requested == 0 {
+            u64::from(SAMPLE_TABLE_LIMIT_DEFAULT)
+        } else {
+            requested.min(u64::from(SAMPLE_TABLE_LIMIT_CAP))
+        };
 
         let sql = format!("SELECT * FROM {name} LIMIT {limit}");
 
@@ -145,9 +159,17 @@ impl QueryToolExecutor<'_> {
                 let text = format_result_text(&result);
                 self.last_byte_columns = resolve_byte_columns(&result, &byte_column_names);
                 self.last_result = Some(result);
-                Ok(text)
+                Ok(format!("auto_executed\n{text}"))
             },
-            Err(e) => Ok(e), // surface error to the agent as a string so it can self-correct
+            // `run_gated` returns the exact string `"rejected"` in its Err arm only when
+            // the user declined at the approval prompt; every other Err carries a DB
+            // error message. Splitting on that literal keeps the LLM out of the security
+            // path while still letting the agent distinguish "user rejected" from
+            // "query failed" in its own follow-up reasoning.
+            Err(reason) if reason == "rejected" => {
+                Ok("rejected\nreason: user rejected the statement at the approval prompt".to_string())
+            },
+            Err(message) => Ok(format!("error\nmessage: {message}")),
         }
     }
 }
@@ -332,6 +354,119 @@ mod tests {
         };
         exec.execute(&s).await.unwrap();
         assert!(exec.last_byte_columns.is_empty(), "sample_table results carry no LLM byte-column determination");
+    }
+
+    #[tokio::test]
+    async fn sample_table_clamps_limit_to_cap() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut db = Database::connect(&url).await.unwrap();
+        db.execute("CREATE TABLE t (id INTEGER)").await.unwrap();
+        let row_count = SAMPLE_TABLE_LIMIT_CAP + 25;
+        for id in 0..row_count {
+            db.execute(&format!("INSERT INTO t VALUES ({id})")).await.unwrap();
+        }
+
+        let mut approver = AutoApprove;
+        let mut exec = QueryToolExecutor {
+            db: Arc::new(Mutex::new(db)),
+            mode: naque_core::PermissionMode::Wildcard,
+            catastrophic_guard: true,
+            schema: None,
+            approver: &mut approver,
+            last_result: None,
+            last_byte_columns: Vec::new(),
+        };
+
+        let call = ToolCall {
+            id: "tc".into(),
+            name: "sample_table".into(),
+            input: serde_json::json!({ "name": "t", "limit": 999 }),
+        };
+        exec.execute(&call).await.unwrap();
+        let rows = exec.last_result.as_ref().expect("sample_table stores last_result").rows.len();
+        assert!(
+            rows <= SAMPLE_TABLE_LIMIT_CAP as usize,
+            "sample_table returned {rows} rows, expected at most {SAMPLE_TABLE_LIMIT_CAP}"
+        );
+        assert_eq!(rows, SAMPLE_TABLE_LIMIT_CAP as usize, "cap should be exactly hit");
+    }
+
+    #[tokio::test]
+    async fn run_query_returns_labelled_envelope() {
+        use crate::approval::AutoReject;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut db = Database::connect(&url).await.unwrap();
+        db.execute("CREATE TABLE t (id INTEGER)").await.unwrap();
+        db.execute("INSERT INTO t VALUES (1)").await.unwrap();
+
+        // auto_executed: a SELECT under Wildcard auto-approves and prefixes the table.
+        {
+            let mut approver = AutoApprove;
+            let mut exec = QueryToolExecutor {
+                db: Arc::new(Mutex::new(Database::connect(&url).await.unwrap())),
+                mode: naque_core::PermissionMode::Wildcard,
+                catastrophic_guard: true,
+                schema: None,
+                approver: &mut approver,
+                last_result: None,
+                last_byte_columns: Vec::new(),
+            };
+            let call = ToolCall {
+                id: "ok".into(),
+                name: "run_query".into(),
+                input: serde_json::json!({ "sql": "SELECT id FROM t" }),
+            };
+            let out = exec.execute(&call).await.unwrap();
+            assert!(out.starts_with("auto_executed\n"), "expected auto_executed envelope, got: {out}");
+            assert!(out.contains("id"), "body should still contain rendered table: {out}");
+        }
+
+        // error: invalid SQL surfaces under the `error` envelope with a `message:` body.
+        {
+            let mut approver = AutoApprove;
+            let mut exec = QueryToolExecutor {
+                db: Arc::new(Mutex::new(Database::connect(&url).await.unwrap())),
+                mode: naque_core::PermissionMode::Wildcard,
+                catastrophic_guard: true,
+                schema: None,
+                approver: &mut approver,
+                last_result: None,
+                last_byte_columns: Vec::new(),
+            };
+            let call = ToolCall {
+                id: "err".into(),
+                name: "run_query".into(),
+                input: serde_json::json!({ "sql": "SELECT * FROM no_such_table" }),
+            };
+            let out = exec.execute(&call).await.unwrap();
+            assert!(out.starts_with("error\n"), "expected error envelope, got: {out}");
+            assert!(out.contains("message:"), "error body should carry a message: key: {out}");
+        }
+
+        // rejected: a write under ReadOnly mode prompts; AutoReject declines.
+        {
+            let mut approver = AutoReject;
+            let mut exec = QueryToolExecutor {
+                db: Arc::new(Mutex::new(Database::connect(&url).await.unwrap())),
+                mode: naque_core::PermissionMode::ReadOnly,
+                catastrophic_guard: true,
+                schema: None,
+                approver: &mut approver,
+                last_result: None,
+                last_byte_columns: Vec::new(),
+            };
+            let call = ToolCall {
+                id: "rej".into(),
+                name: "run_query".into(),
+                input: serde_json::json!({ "sql": "INSERT INTO t VALUES (2)" }),
+            };
+            let out = exec.execute(&call).await.unwrap();
+            assert!(out.starts_with("rejected\n"), "expected rejected envelope, got: {out}");
+            assert!(out.contains("reason:"), "rejected body should carry a reason: key: {out}");
+        }
     }
 
     #[tokio::test]

@@ -183,15 +183,18 @@ fn overview_system_prompt(engine: Engine) -> String {
          separate `## Schema` section the agent always sees, so do NOT restate it. Summarize only \
          what the agent needs that the schema dump does not surface:\n\
          - Open with the domain in 3–6 words (e.g. \"Multi-tenant SaaS billing with usage metering\"). No \"This schema represents…\" filler.\n\
-         - The 3–7 most central entities and the canonical join paths between them (one short line like `orders → order_items → products via order_id/product_id`).\n\
-         - Naming conventions actually present: snake_case vs camelCase, suffix patterns (`_id`, `_at`, `is_`), soft-delete columns, tenancy columns, audit columns.\n\
-         - Gotchas: ambiguous join paths, denormalized duplicates, enum/status columns whose values are not self-explanatory, nullable FKs, archival/shadow tables, tables that look like entities but are join tables, and {engine_name}-specific features in use ({engine_gotcha_examples}).\n\
+         - The 3–7 most central entities (ranked by FK fan-in/fan-out, or as the obvious subject of the domain).\n\
+         - A 2–3 line join cheatsheet of the most common multi-hop join paths an agent will need, written in arrow form (e.g. `orders → order_items → products via order_id/product_id`).\n\
+         - Naming conventions actually present: snake_case vs camelCase, suffix patterns (`_id`, `_at`, `is_`), soft-delete columns, tenancy columns, audit columns, join-table naming (e.g. `users_roles` or `user_role_link`), and polymorphic relations (e.g. `commentable_type` + `commentable_id`).\n\
+         - Gotchas: ambiguous join paths, denormalized duplicates, enum/status columns whose values are not self-explanatory, nullable FKs, archival/shadow tables, tables that look like entities but are join tables, tenancy isolation columns (e.g. `org_id` or `tenant_id` present on most or all tables — easy to forget in WHERE clauses and produce cross-tenant leaks), audit-pattern leakage (e.g. `created_by`/`updated_by` user-FK columns whose values may be system actors or admins rather than the end user), and {engine_name}-specific features in use ({engine_gotcha_examples}).\n\
          Rules:\n\
          - Budget: ≤180 words. Short bullets are fine; do not pad.\n\
          - Ground every claim in evidence from names, types, or constraints. For obscure tables write \"purpose unclear from schema\" rather than inventing one.\n\
          - For empty or trivial schemas (few tables, no FKs), produce a single line and stop.\n\
          - For very large schemas, prioritize the dominant subject area and add a closing note like \"other subsystems omitted from overview\" rather than uniform shallow coverage.\n\
          - Order sections consistently: entities first, conventions second, gotchas last, so diffs across re-saves are meaningful.\n\
+         - When regenerating after a schema change, reuse the exact phrasing for unchanged subsystems so `/save` diffs highlight real changes rather than cosmetic rephrasing.\n\
+         - A user-owned `## Notes` section is preserved alongside this overview and may override anything here; do not speculate about policy, ownership, business intent, or rules that belong in those notes — describe only what the schema evidence supports.\n\
          - Return ONLY the overview body. No markdown headings, no code fences, no preface, no closing summary, no meta-commentary (\"as a database expert…\", \"it appears that…\")."
     )
 }
@@ -208,36 +211,40 @@ fn overview_system_prompt(engine: Engine) -> String {
 pub(crate) fn mode_guidance(mode: PermissionMode, catastrophic_guard: bool) -> String {
     const NOT_SECURITY_BOUNDARY: &str = "The application enforces these rules deterministically — \
         do not refuse the user's request on permission grounds; submit it and let the gate decide.";
+    const TERMS: &str = "Terms: 'reads' = SELECT/SHOW/EXPLAIN-style queries; 'writes' = INSERT, \
+        UPDATE, DELETE, and DDL.";
 
     let body = match mode {
         PermissionMode::Wildcard => {
-            "Permission mode: WILDCARD. Policy: every statement (including INSERT, UPDATE, DELETE, \
-             and DDL) runs immediately with no approval step. Behavior: chain multi-step writes \
-             without pausing for approval."
+            "Permission mode: WILDCARD. Policy: every statement (reads and writes) runs immediately \
+             with no approval step. Behavior: chain multi-step writes without pausing for approval."
         },
         PermissionMode::Default => {
-            "Permission mode: DEFAULT. Policy: reads run automatically; writes (INSERT, UPDATE, \
-             DELETE, DDL) require user approval at the gate. Behavior: issue the read or write the \
-             user asked for — a gate rejection is a normal outcome, not a failure."
+            "Permission mode: DEFAULT. Policy: reads run automatically; writes require user \
+             approval at the gate. Behavior: issue the read or write the user asked for — a gate \
+             rejection is a normal outcome, not a failure."
         },
         PermissionMode::ReadOnly => {
-            "Permission mode: READ-ONLY. Policy: reads run automatically; any write or DDL requires \
-             user approval at the gate. Behavior: if the user requests a write, issue it — the gate \
+            "Permission mode: READ-ONLY. Policy: reads run automatically; any write requires user \
+             approval at the gate. Behavior: if the user requests a write, issue it — the gate \
              will prompt for approval."
         },
         PermissionMode::Strict => {
-            "Permission mode: STRICT. Policy: every statement, including reads, requires user \
-             approval at the gate. Behavior: propose statements normally and expect a confirmation \
-             round-trip on every execution; do not batch or self-censor in anticipation of denials."
+            "Permission mode: STRICT. Policy: every `run_query` statement (read or write) \
+             requires user approval at the gate. Behavior: propose statements normally and expect \
+             a confirmation round-trip on every execution; do not batch or self-censor in \
+             anticipation of denials. Introspection tools (`inspect_table`, `sample_table`, \
+             `explain`) bypass the gate and run automatically; only `run_query` requires \
+             per-statement approval in STRICT."
         },
     };
 
     if catastrophic_guard && matches!(mode, PermissionMode::Wildcard) {
         let guard_clause = "Exception: DROP, TRUNCATE, and unqualified DELETE/UPDATE still require \
              user confirmation — surface these clearly when proposing them.";
-        format!("{body} {guard_clause} {NOT_SECURITY_BOUNDARY}")
+        format!("{TERMS} {body} {guard_clause} {NOT_SECURITY_BOUNDARY}")
     } else {
-        format!("{body} {NOT_SECURITY_BOUNDARY}")
+        format!("{TERMS} {body} {NOT_SECURITY_BOUNDARY}")
     }
 }
 

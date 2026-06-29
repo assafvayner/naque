@@ -30,28 +30,55 @@ fn estimate_cost_usd(usage: &naque_llm::Usage) -> f64 {
 // Render
 // ---------------------------------------------------------------------------
 
+/// Prompt prefix on the first input row; continuation rows align under it.
+const INPUT_PREFIX: &str = "> ";
+const INPUT_CONT: &str = "  ";
+/// Cap on input-band rows; taller input scrolls vertically to follow the cursor.
+const INPUT_MAX_ROWS: u16 = 6;
+/// Cap on rows shown for queued submissions before collapsing to a summary.
+const QUEUE_MAX_ROWS: usize = 5;
+
 /// Render one frame of the main UI.
 ///
 /// Layout (top to bottom):
 /// 1. Transcript area — scrollable list of history entries.
 /// 2. Result table — last query result, if any.
 /// 3. Activity line — pinned spinner row while a turn runs (height 0 when idle).
-/// 4. Approval prompt — overlaid when `pending` is Some.
+/// 4. Queued submissions — lines entered while a turn runs, dimmed.
 /// 5. Status bar — single line.
-/// 6. Input line — `> {input}`.
-pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pending: Option<&ApprovalPrompt>) {
+/// 6. Input line(s) — `> {input}`, wrapped onto multiple rows when needed.
+/// 7. Approval prompt — overlaid as a centered modal when `pending` is Some.
+pub fn render(
+    frame: &mut Frame,
+    app: &App,
+    theme: &Theme,
+    input: &InputLine,
+    queued: &[String],
+    pending: Option<&ApprovalPrompt>,
+) {
     let size = frame.area();
+    let prefix_w = INPUT_PREFIX.len() as u16;
 
-    // Determine heights: input = 1, status = 1, result = up to 8 if present,
-    // activity = 1 while running (0 when idle), transcript = remainder.
-    // The approval prompt is no longer a layout band — it is drawn as a
-    // centered modal popup over the whole screen (below).
+    // Wrap the input up front so the bottom band can grow to fit the wrapped
+    // rows (capped at INPUT_MAX_ROWS). This is what keeps long/multiline input
+    // on screen instead of scrolling it horizontally out of view.
+    let input_text_w = size.width.saturating_sub(prefix_w).max(1);
+    let wrapped = input.wrap(input_text_w);
+    let input_rows = (wrapped.rows.len() as u16).clamp(1, INPUT_MAX_ROWS);
+
+    // Determine heights: input = input_rows, status = 1, result = up to 8 if
+    // present, activity = 1 while running, queued = one row per queued line
+    // (capped), transcript = remainder. The approval prompt is not a layout band
+    // — it is drawn as a centered modal popup over the whole screen (below).
     let has_result = app.last_result().is_some();
 
     let result_height: u16 = if has_result { 8 } else { 0 };
     let activity_height: u16 = if app.live.running { 1 } else { 0 };
-    let fixed_bottom: u16 = 1 + 1; // status + input
-    let transcript_height = size.height.saturating_sub(fixed_bottom + result_height + activity_height);
+    let queued_height = queued.len().min(QUEUE_MAX_ROWS) as u16;
+    let fixed_bottom: u16 = 1 + input_rows; // status + input
+    let transcript_height = size
+        .height
+        .saturating_sub(fixed_bottom + result_height + activity_height + queued_height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -59,8 +86,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pe
             Constraint::Length(transcript_height),
             Constraint::Length(result_height),
             Constraint::Length(activity_height),
-            Constraint::Length(1), // status bar
-            Constraint::Length(1), // input line
+            Constraint::Length(queued_height), // queued submissions
+            Constraint::Length(1),             // status bar
+            Constraint::Length(input_rows),    // input line(s)
         ])
         .split(size);
 
@@ -150,24 +178,59 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme, input: &InputLine, pe
             mark: Some(app.logo().mark_span(theme.color)),
         };
         let buf = frame.buffer_mut();
-        bar.render(theme, chunks[3], buf);
+        bar.render(theme, chunks[4], buf);
     }
 
-    // ---- Input line --------------------------------------------------------
+    // ---- Queued submissions ------------------------------------------------
+    // Lines the user enqueued while a turn was running, shown dimmed just above
+    // the status bar so they can see what will run next.
+    if queued_height > 0 {
+        let shown = queued_height as usize;
+        let overflow = queued.len() > QUEUE_MAX_ROWS;
+        let body = if overflow { shown.saturating_sub(1) } else { shown };
+        let mut lines: Vec<Line> = Vec::with_capacity(shown);
+        for q in queued.iter().take(body) {
+            lines.push(Line::from(Span::styled(format!("» {q}"), theme.dim_style())));
+        }
+        if overflow {
+            let more = queued.len() - body;
+            lines.push(Line::from(Span::styled(format!("» … {more} more queued"), theme.dim_style())));
+        }
+        frame.render_widget(Paragraph::new(lines), chunks[3]);
+    }
+
+    // ---- Input line(s) -----------------------------------------------------
     {
-        let input_chunk = chunks[4];
-        const PREFIX: &str = "> ";
-        let prefix_w = PREFIX.len() as u16;
-        let text_w = input_chunk.width.saturating_sub(prefix_w);
-        let view = input.view(text_w);
-        let line = Line::from(Span::raw(format!("{PREFIX}{}", view.visible)));
-        frame.render_widget(Paragraph::new(line), input_chunk);
+        let input_chunk = chunks[5];
+        let rows_shown = input_rows as usize;
+        let total = wrapped.rows.len();
+        // Window the wrapped rows so the cursor row stays visible when the input
+        // is taller than the cap.
+        let window_start = if wrapped.cursor_row < rows_shown {
+            0
+        } else {
+            wrapped.cursor_row - rows_shown + 1
+        };
+        let end = (window_start + rows_shown).min(total);
+        let mut lines: Vec<Line> = Vec::with_capacity(end - window_start);
+        for (i, row) in wrapped.rows[window_start..end].iter().enumerate() {
+            let pfx = if window_start + i == 0 {
+                INPUT_PREFIX
+            } else {
+                INPUT_CONT
+            };
+            lines.push(Line::from(Span::raw(format!("{pfx}{row}"))));
+        }
+        frame.render_widget(Paragraph::new(lines), input_chunk);
 
         // Place the terminal cursor at the input position. Skipped while an
         // approval modal owns focus (it has its own input handling).
         if pending.is_none() {
-            let cx = input_chunk.x + prefix_w + view.cursor_col;
-            frame.set_cursor_position((cx, input_chunk.y));
+            let max_col = input_text_w.saturating_sub(1);
+            let col = wrapped.cursor_col.min(max_col);
+            let cx = input_chunk.x + prefix_w + col;
+            let cy = input_chunk.y + (wrapped.cursor_row - window_start) as u16;
+            frame.set_cursor_position((cx, cy));
         }
 
         // After a first idle Ctrl+C, prompt the user that another press exits.
@@ -434,6 +497,9 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
 ) -> anyhow::Result<()> {
     let mut input = InputLine::new();
     let mut history = History::new();
+    // Submissions entered while a turn is running, dispatched in order once it
+    // finishes. Lets the user line up the next query without waiting.
+    let mut queued: Vec<String> = Vec::new();
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(80));
     let mut pending: Option<(ApprovalRequest, ApprovalPrompt)> = None;
@@ -448,8 +514,10 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
             suggest_selected = 0;
         }
 
-        // Build the autocomplete popup for this frame, if it should show.
-        let suggest = if pending.is_none() && !app.is_turn_running() && !suggest_dismissed {
+        // Build the autocomplete popup for this frame, if it should show. Shown
+        // even while a turn runs, since the input stays editable (e.g. to queue
+        // a slash command). Suppressed only while an approval modal owns focus.
+        let suggest = if pending.is_none() && !suggest_dismissed {
             let matches = slash_suggest_prefix(input.text()).map(naque_tui::matching).unwrap_or_default();
             (!matches.is_empty()).then(|| naque_tui::SlashSuggest::new(matches, suggest_selected))
         } else {
@@ -459,7 +527,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
         {
             let prompt_ref = pending.as_ref().map(|(_, p)| p);
             terminal.draw(|f| {
-                render(f, app, theme, &input, prompt_ref);
+                render(f, app, theme, &input, &queued, prompt_ref);
                 if let Some(sg) = suggest.as_ref() {
                     render_suggest_popup(f, theme, sg);
                 }
@@ -539,57 +607,61 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 }
 
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                let editable = !app.is_turn_running();
+                // Wrap width for vertical cursor movement (matches the renderer:
+                // full width minus the 2-column prompt). Falls back if unknown.
+                let text_w = terminal.size().map(|s| s.width.saturating_sub(2)).unwrap_or(78).max(1);
+                // Alt/Shift+Enter inserts a newline for multi-line composition;
+                // plain Enter submits (or queues while a turn is running).
+                let newline = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
                 match key.code {
-                    KeyCode::Enter if editable => {
+                    KeyCode::Enter if newline => input.insert('\n'),
+                    KeyCode::Enter => {
                         let line = input.take();
                         if line.trim().is_empty() {
                             continue;
                         }
                         history.push(&line);
-                        let trimmed = line.trim();
-                        let is_cmd = |c: &str| trimmed == c || trimmed.starts_with(&format!("{c} "));
-                        if is_cmd("/profile") {
-                            handle_profile_command(app, theme, terminal).await;
-                        } else if is_cmd("/env") {
-                            handle_env_command(app, theme, terminal).await;
-                        } else if is_cmd("/save") {
-                            let args = trimmed.strip_prefix("/save").map(str::trim).unwrap_or("");
-                            handle_save_command(app, theme, terminal, args).await;
-                        } else if is_cmd("/learn") {
-                            handle_learn_command(app, theme, terminal).await;
+                        // While a turn runs the agent is busy, so queue the line
+                        // and dispatch it when the turn finishes.
+                        if app.is_turn_running() {
+                            queued.push(line);
                         } else {
-                            dispatch_line(app, terminal, theme, &line).await;
-                        }
-                        if app.should_quit() {
-                            break;
+                            submit_line(app, terminal, theme, &line).await;
+                            if app.should_quit() {
+                                break;
+                            }
                         }
                     },
                     KeyCode::PageUp => app.live.scroll_up(5),
                     KeyCode::PageDown => app.live.scroll_down(5),
                     // Ctrl+End jumps the transcript to the latest entry.
                     KeyCode::End if ctrl => app.live.scroll_to_latest(),
-                    // --- input editing (disabled while a turn runs) ---
-                    KeyCode::Left if editable => input.move_left(),
-                    KeyCode::Right if editable => input.move_right(),
-                    KeyCode::Home if editable => input.move_home(),
-                    KeyCode::End if editable => input.move_end(),
-                    // Up/Down recall session history (popup intercepts these when open).
-                    KeyCode::Up if editable => {
-                        if let Some(text) = history.older(input.text()) {
+                    // --- input editing (always available, even while a turn runs) ---
+                    KeyCode::Left => input.move_left(),
+                    KeyCode::Right => input.move_right(),
+                    KeyCode::Home => input.move_home(),
+                    KeyCode::End => input.move_end(),
+                    // Up/Down move between wrapped rows; at the top/bottom edge they
+                    // recall session history (popup intercepts these when open).
+                    KeyCode::Up => {
+                        if !input.move_up(text_w)
+                            && let Some(text) = history.older(input.text())
+                        {
                             input.set_text(text);
                         }
                     },
-                    KeyCode::Down if editable => {
-                        if let Some(text) = history.newer() {
+                    KeyCode::Down => {
+                        if !input.move_down(text_w)
+                            && let Some(text) = history.newer()
+                        {
                             input.set_text(text);
                         }
                     },
-                    KeyCode::Char('a') if editable && ctrl => input.move_home(),
-                    KeyCode::Char('e') if editable && ctrl => input.move_end(),
-                    KeyCode::Delete if editable => input.delete(),
-                    KeyCode::Backspace if editable => input.backspace(),
-                    KeyCode::Char(c) if editable && !ctrl => input.insert(c),
+                    KeyCode::Char('a') if ctrl => input.move_home(),
+                    KeyCode::Char('e') if ctrl => input.move_end(),
+                    KeyCode::Delete => input.delete(),
+                    KeyCode::Backspace => input.backspace(),
+                    KeyCode::Char(c) if !ctrl => input.insert(c),
                     _ => {},
                 }
 
@@ -618,9 +690,25 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                     // buffered events (finalize_turn does the draining itself).
                     TurnStep::Finished => {
                         app.finalize_turn().await;
+                        // Dispatch queued submissions in order. Commands run inline
+                        // and we keep going; the first natural-language line starts a
+                        // new turn, so we stop and let its completion drain the rest.
+                        while !app.is_turn_running() {
+                            let Some(line) = (!queued.is_empty()).then(|| queued.remove(0)) else {
+                                break;
+                            };
+                            submit_line(app, terminal, theme, &line).await;
+                            if app.should_quit() {
+                                break;
+                            }
+                        }
                     },
                 }
             }
+        }
+
+        if app.should_quit() {
+            break;
         }
 
         // Surface a pending approval request from the running turn as modal state.
@@ -680,6 +768,31 @@ async fn turn_step(app: &mut App) -> TurnStep {
             }
             _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
+    }
+}
+
+/// Route a submitted input line: slash commands that need their own UI flow are
+/// handled here; everything else goes through [`dispatch_line`]. Shared by the
+/// interactive Enter path and the queued-submission drain.
+async fn submit_line<B: ratatui::backend::Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    theme: &Theme,
+    line: &str,
+) {
+    let trimmed = line.trim();
+    let is_cmd = |c: &str| trimmed == c || trimmed.starts_with(&format!("{c} "));
+    if is_cmd("/profile") {
+        handle_profile_command(app, theme, terminal).await;
+    } else if is_cmd("/env") {
+        handle_env_command(app, theme, terminal).await;
+    } else if is_cmd("/save") {
+        let args = trimmed.strip_prefix("/save").map(str::trim).unwrap_or("");
+        handle_save_command(app, theme, terminal, args).await;
+    } else if is_cmd("/learn") {
+        handle_learn_command(app, theme, terminal).await;
+    } else {
+        dispatch_line(app, terminal, theme, line).await;
     }
 }
 
@@ -929,7 +1042,7 @@ fn snapshot_app<B: ratatui::backend::Backend>(
     let empty = InputLine::new();
     let area = terminal.get_frame().area();
     terminal
-        .draw(|f| render(f, app, theme, &empty, None))
+        .draw(|f| render(f, app, theme, &empty, &[], None))
         .map(|completed| completed.buffer.clone())
         .unwrap_or_else(|_| ratatui::buffer::Buffer::empty(area))
 }
@@ -1164,7 +1277,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from("draft input"), None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from("draft input"), &[], None))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1182,7 +1295,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         // Fresh session: the welcome splash (tagline + wordmark glyphs) is shown.
-        terminal.draw(|f| render(f, &app, &theme, &InputLine::from(""), None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None))
+            .unwrap();
         let text = buf_text(&terminal);
         assert!(text.contains("ask your database"), "welcome tagline should show on a fresh session:\n{text}");
         assert!(
@@ -1192,7 +1307,9 @@ mod tests {
 
         // Once the conversation starts, the splash is replaced by the transcript.
         app.transcript.push(TranscriptEntry::User("hi".into()));
-        terminal.draw(|f| render(f, &app, &theme, &InputLine::from(""), None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None))
+            .unwrap();
         let text = buf_text(&terminal);
         assert!(!text.contains("ask your database"), "welcome must clear once the transcript is non-empty:\n{text}");
     }
@@ -1209,7 +1326,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from(""), Some(&prompt)))
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], Some(&prompt)))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1248,13 +1365,69 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from("my query"), None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from("my query"), &[], None))
             .unwrap();
 
         let text = buf_text(&terminal);
         assert!(text.contains("hello"), "expected 'hello' in buffer:\n{text}");
         assert!(text.contains("my query"), "expected input:\n{text}");
         drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn long_input_wraps_instead_of_scrolling_off_screen() {
+        let mut app = make_test_app().await;
+        app.transcript.push(TranscriptEntry::User("hi".into()));
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // A line far wider than the terminal. With horizontal scrolling only the
+        // tail near the cursor would show; wrapping keeps the head visible too.
+        let long = format!("HEAD{}TAIL", "x".repeat(120));
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from(long.as_str()), &[], None))
+            .unwrap();
+
+        let text = buf_text(&terminal);
+        assert!(text.contains("HEAD"), "wrapped input should keep the head visible:\n{text}");
+        assert!(text.contains("TAIL"), "wrapped input should keep the tail visible:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn explicit_newlines_render_on_separate_rows() {
+        let mut app = make_test_app().await;
+        app.transcript.push(TranscriptEntry::User("hi".into()));
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from("first line\nsecond line"), &[], None))
+            .unwrap();
+
+        let text = buf_text(&terminal);
+        assert!(text.contains("first line"), "expected first input line:\n{text}");
+        assert!(text.contains("second line"), "expected second input line:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn queued_lines_render_above_the_input() {
+        let mut app = make_test_app().await;
+        app.transcript.push(TranscriptEntry::User("hi".into()));
+        let theme = Theme::new(false);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let queued = vec!["queued one".to_string(), "queued two".to_string()];
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from("typing next"), &queued, None))
+            .unwrap();
+
+        let text = buf_text(&terminal);
+        assert!(text.contains("queued one"), "expected first queued line:\n{text}");
+        assert!(text.contains("queued two"), "expected second queued line:\n{text}");
+        assert!(text.contains("typing next"), "expected live input alongside the queue:\n{text}");
     }
 
     #[tokio::test]
@@ -1354,7 +1527,9 @@ mod render_tests {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::new(true);
-        terminal.draw(|f| render(f, &app, &theme, &InputLine::from(""), None)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None))
+            .unwrap();
 
         let text = buffer_text(&terminal);
         assert!(text.contains("run_query"), "pinned line/step missing: {text:?}");
@@ -1374,7 +1549,7 @@ mod render_tests {
         let backend = TestBackend::new(80, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render(f, &app, &Theme::new(false), &InputLine::from(""), None))
+            .draw(|f| render(f, &app, &Theme::new(false), &InputLine::from(""), &[], None))
             .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("run_query") && text.contains("iter 3/"), "{text:?}");
@@ -1391,14 +1566,14 @@ mod render_tests {
 
         // Idle, not armed: no hint.
         terminal
-            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), None))
+            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), &[], None))
             .unwrap();
         assert!(!buffer_text(&terminal).contains("again to exit"), "hint must not show when idle");
 
         // After a first idle Ctrl+C: the hint appears.
         app.quit_armed = true;
         terminal
-            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), None))
+            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), &[], None))
             .unwrap();
         assert!(buffer_text(&terminal).contains("again to exit"), "hint must show when quit_armed");
     }
