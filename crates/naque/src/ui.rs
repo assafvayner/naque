@@ -98,10 +98,16 @@ pub fn render(
     if app.transcript().is_empty() && !app.live.running {
         render_welcome(frame, app, theme, chunks[0]);
     } else {
+        let width = chunks[0].width;
         let lines: Vec<Line> = app
             .transcript()
             .iter()
-            .flat_map(|entry| transcript_lines(entry, theme))
+            .enumerate()
+            .flat_map(|(i, entry)| {
+                let expanded = app.expanded_steps.contains(&i);
+                let selected = app.selected_step == Some(i);
+                transcript_lines(entry, theme, expanded, selected, width)
+            })
             .collect();
 
         // Bottom-align: show the most recent entries adjacent to the result /
@@ -359,7 +365,113 @@ fn agent_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
     out
 }
 
-fn transcript_lines<'a>(entry: &'a TranscriptEntry, theme: &Theme) -> Vec<Line<'a>> {
+/// Logical SQL lines shown before truncation in a collapsed running step.
+const SQL_PREVIEW_LINES: usize = 5;
+
+/// Tools whose `detail` is a SQL statement rendered as a multi-line block.
+fn is_sql_tool(name: &str) -> bool {
+    matches!(name, "run_query" | "explain")
+}
+
+/// Truncate `s` to at most `max` columns (char-approximated), appending '…' on
+/// overflow so a long line cannot soft-wrap and blow the height budget.
+fn truncate_cols(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
+    t.push('…');
+    t
+}
+
+/// Lines for one tool step: a header plus, for SQL tools that are running (or a
+/// finished step the user expanded), a capped `│ `-gutter SQL block.
+// All 8 parameters are distinct concerns (identity, status, interaction flags, layout, theme);
+// bundling them into a struct would add indirection for a single call site.
+#[allow(clippy::too_many_arguments)]
+fn tool_step_lines(
+    name: &str,
+    detail: Option<&str>,
+    status: &crate::app::StepStatus,
+    summary: Option<&str>,
+    expanded: bool,
+    selected: bool,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    use crate::app::StepStatus;
+
+    let (glyph, glyph_style) = match status {
+        StepStatus::Running => ("▸", theme.activity_style()),
+        StepStatus::Ok => ("✓", theme.label_style("read-only")),
+        StepStatus::Err => ("✗", theme.label_style("DDL: DROP")),
+    };
+    let marker = if selected {
+        Span::styled("❯ ", theme.activity_style())
+    } else {
+        Span::raw("  ")
+    };
+
+    let running = matches!(status, StepStatus::Running);
+    let is_sql = is_sql_tool(name);
+    let sql = detail.map(str::trim).filter(|s| !s.is_empty());
+    let show_block = is_sql && sql.is_some() && (running || expanded);
+
+    let mut header: Vec<Span<'static>> = vec![
+        marker,
+        Span::styled(glyph.to_string(), glyph_style),
+        Span::raw(format!(" {name}")),
+    ];
+    if !show_block {
+        // SQL tool not showing a block => finished & collapsed: show the summary.
+        // Target tools: always show the detail target (fall back to the summary).
+        let inline = if is_sql {
+            summary.map(str::to_string)
+        } else {
+            sql.map(str::to_string).or_else(|| summary.map(str::to_string))
+        };
+        if let Some(d) = inline {
+            header.push(Span::styled(format!(" {d}"), theme.dim_style()));
+        }
+    }
+
+    let mut out: Vec<Line<'static>> = vec![Line::from(header)];
+
+    if show_block {
+        let sql = sql.unwrap();
+        let gutter = "  │ ";
+        let content_w = (width as usize).saturating_sub(gutter.chars().count());
+        let logical: Vec<&str> = sql.split('\n').collect();
+        let total = logical.len();
+        let cap = if expanded { total } else { SQL_PREVIEW_LINES.min(total) };
+        for raw in logical.iter().take(cap) {
+            let text = truncate_cols(raw, content_w);
+            out.push(Line::from(Span::styled(format!("{gutter}{text}"), theme.dim_style())));
+        }
+        if !expanded && total > cap {
+            let more = total - cap;
+            out.push(Line::from(Span::styled(format!("  … +{more} more · ctrl+r to expand"), theme.dim_style())));
+        } else if expanded && total > SQL_PREVIEW_LINES {
+            out.push(Line::from(Span::styled("  ctrl+r to collapse", theme.dim_style())));
+        }
+        if !running && let Some(s) = summary {
+            out.push(Line::from(Span::styled(format!("  └ {s}"), theme.dim_style())));
+        }
+    }
+
+    out
+}
+
+fn transcript_lines<'a>(
+    entry: &'a TranscriptEntry,
+    theme: &Theme,
+    expanded: bool,
+    selected: bool,
+    width: u16,
+) -> Vec<Line<'a>> {
     match entry {
         TranscriptEntry::User(text) => prefixed_lines("you: ", text),
         TranscriptEntry::Agent(text) => agent_lines(text, theme),
@@ -378,26 +490,10 @@ fn transcript_lines<'a>(entry: &'a TranscriptEntry, theme: &Theme) -> Vec<Line<'
         },
         TranscriptEntry::ToolStep {
             name,
-            sql,
+            detail,
             status,
             summary,
-        } => {
-            let (glyph, glyph_style) = match status {
-                crate::app::StepStatus::Running => ("▸", theme.activity_style()),
-                crate::app::StepStatus::Ok => ("✓", theme.label_style("read-only")),
-                crate::app::StepStatus::Err => ("✗", theme.label_style("DDL: DROP")),
-            };
-            let detail = match status {
-                crate::app::StepStatus::Running => sql.clone().unwrap_or_default(),
-                _ => summary.clone().or_else(|| sql.clone()).unwrap_or_default(),
-            };
-            vec![Line::from(vec![
-                Span::raw("  "),
-                Span::styled(glyph, glyph_style),
-                Span::raw(format!(" {name} ")),
-                Span::styled(detail, theme.dim_style()),
-            ])]
-        },
+        } => tool_step_lines(name, detail.as_deref(), status, summary.as_deref(), expanded, selected, width, theme),
     }
 }
 
@@ -1519,7 +1615,7 @@ mod render_tests {
         app.transcript_mut().push(TranscriptEntry::Reasoning("checking orders".into()));
         app.transcript_mut().push(TranscriptEntry::ToolStep {
             name: "run_query".into(),
-            sql: Some("SELECT count(*) FROM orders".into()),
+            detail: Some("SELECT count(*) FROM orders".into()),
             status: crate::app::StepStatus::Running,
             summary: None,
         });
@@ -1625,11 +1721,133 @@ mod render_tests {
     #[test]
     fn agent_answer_splits_into_aligned_lines() {
         let entry = TranscriptEntry::Agent("line one\nline two".into());
-        let lines = transcript_lines(&entry, &Theme::new(false));
+        let lines = transcript_lines(&entry, &Theme::new(false), false, false, 80);
         assert_eq!(lines.len(), 2, "a two-line answer must render as two lines");
         let text = |l: &Line| -> String { l.spans.iter().map(|s| s.content.as_ref()).collect() };
         assert_eq!(text(&lines[0]), " ai: line one");
         assert_eq!(text(&lines[1]), "     line two", "continuation aligns under the body");
+    }
+
+    fn line_text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn truncate_cols_boundaries() {
+        assert_eq!(truncate_cols("hello", 0), "");
+        assert_eq!(truncate_cols("hello", 1), "…");
+        assert_eq!(truncate_cols("hi", 2), "hi", "exact fit is unchanged");
+        assert_eq!(truncate_cols("hello", 3), "he…");
+    }
+
+    #[test]
+    fn tool_step_running_sql_block_caps_and_expands() {
+        let theme = Theme::new(false);
+        let sql = "SELECT a\nFROM t\nWHERE x\nGROUP BY a\nHAVING c\nORDER BY a\nLIMIT 10";
+        // 7 logical lines; SQL_PREVIEW_LINES = 5.
+
+        // Collapsed: header + 5 block lines + a "+2 more" hint.
+        let lines =
+            tool_step_lines("run_query", Some(sql), &crate::app::StepStatus::Running, None, false, false, 80, &theme);
+        assert_eq!(line_text(&lines[0]), "  ▸ run_query");
+        assert_eq!(line_text(&lines[1]), "  │ SELECT a");
+        assert_eq!(lines.len(), 1 + 5 + 1, "header + 5 block + hint");
+        assert!(line_text(&lines[6]).contains("+2 more"), "{:?}", line_text(&lines[6]));
+        assert!(line_text(&lines[6]).contains("ctrl+r to expand"));
+
+        // Expanded: header + all 7 block lines + collapse hint.
+        let lines =
+            tool_step_lines("run_query", Some(sql), &crate::app::StepStatus::Running, None, true, false, 80, &theme);
+        assert_eq!(lines.len(), 1 + 7 + 1, "header + 7 block + collapse hint");
+        assert_eq!(line_text(&lines[7]), "  │ LIMIT 10");
+        assert!(line_text(&lines[8]).contains("ctrl+r to collapse"));
+    }
+
+    #[test]
+    fn tool_step_truncates_long_line_to_width() {
+        let theme = Theme::new(false);
+        let long = "X".repeat(200);
+        let lines =
+            tool_step_lines("run_query", Some(&long), &crate::app::StepStatus::Running, None, false, false, 40, &theme);
+        // gutter "  │ " is 4 cols, so content fits in 36 incl. the ellipsis.
+        let block = line_text(&lines[1]);
+        assert!(block.chars().count() <= 40, "line exceeds width: {}", block.chars().count());
+        assert!(block.ends_with('…'));
+    }
+
+    #[test]
+    fn tool_step_selected_marker_and_finished_forms() {
+        let theme = Theme::new(false);
+        // Selected running step gets the ❯ marker on the header.
+        let lines = tool_step_lines(
+            "run_query",
+            Some("SELECT 1"),
+            &crate::app::StepStatus::Running,
+            None,
+            false,
+            true,
+            80,
+            &theme,
+        );
+        assert!(line_text(&lines[0]).starts_with("❯ "), "{:?}", line_text(&lines[0]));
+
+        // Finished SQL step, collapsed: a single summary one-liner, no block.
+        let lines = tool_step_lines(
+            "run_query",
+            Some("SELECT 1"),
+            &crate::app::StepStatus::Ok,
+            Some("12 rows"),
+            false,
+            false,
+            80,
+            &theme,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "  ✓ run_query 12 rows");
+
+        // Finished SQL step, expanded: header + block + summary footer.
+        let lines = tool_step_lines(
+            "run_query",
+            Some("SELECT 1"),
+            &crate::app::StepStatus::Ok,
+            Some("12 rows"),
+            true,
+            false,
+            80,
+            &theme,
+        );
+        assert_eq!(line_text(&lines[0]), "  ✓ run_query");
+        assert_eq!(line_text(&lines[1]), "  │ SELECT 1");
+        assert_eq!(line_text(&lines[2]), "  └ 12 rows");
+    }
+
+    #[test]
+    fn tool_step_target_tools_show_inline_detail() {
+        let theme = Theme::new(false);
+        let l = tool_step_lines(
+            "inspect_table",
+            Some("orders"),
+            &crate::app::StepStatus::Running,
+            None,
+            false,
+            false,
+            80,
+            &theme,
+        );
+        assert_eq!(line_text(&l[0]), "  ▸ inspect_table orders");
+        assert_eq!(l.len(), 1, "target tools never render a block");
+
+        let l = tool_step_lines(
+            "sample_table",
+            Some("users \u{00B7} limit 10"),
+            &crate::app::StepStatus::Running,
+            None,
+            false,
+            false,
+            80,
+            &theme,
+        );
+        assert_eq!(line_text(&l[0]), "  ▸ sample_table users \u{00B7} limit 10");
     }
 
     #[test]

@@ -71,7 +71,7 @@ pub enum TranscriptEntry {
     /// A tool step; renders multi-line while `Running`, collapses when done.
     ToolStep {
         name: String,
-        sql: Option<String>,
+        detail: Option<String>,
         status: StepStatus,
         summary: Option<String>,
     },
@@ -112,7 +112,7 @@ pub fn apply_event_to_transcript(
             *cur = None;
             transcript.push(TranscriptEntry::ToolStep {
                 name: name.clone(),
-                sql: detail.clone(),
+                detail: detail.clone(),
                 status: StepStatus::Running,
                 summary: None,
             });
@@ -2095,7 +2095,7 @@ pub mod tests {
     fn running_step(name: &str) -> TranscriptEntry {
         TranscriptEntry::ToolStep {
             name: name.into(),
-            sql: Some("SELECT 1".into()),
+            detail: Some("SELECT 1".into()),
             status: StepStatus::Running,
             summary: None,
         }
