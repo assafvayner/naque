@@ -1,5 +1,6 @@
 //! Headless engine — routes input, gates SQL, drives the LLM agent.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use naque_core::PermissionMode;
@@ -429,6 +430,10 @@ pub struct App {
     pub(crate) active_context: Option<String>,
     /// Per-session pixel-art logo (welcome wordmark + status-bar N mark).
     pub(crate) logo: Logo,
+    /// Transcript index of the currently selected tool step (None = follow tail).
+    pub(crate) selected_step: Option<usize>,
+    /// Transcript indices of tool steps the user has expanded.
+    pub(crate) expanded_steps: HashSet<usize>,
 }
 
 impl App {
@@ -469,6 +474,8 @@ impl App {
             // Deterministic default; the binary assigns a per-session random logo
             // via `set_logo`. A fixed seed keeps rendering tests reproducible.
             logo: Logo::new(0),
+            selected_step: None,
+            expanded_steps: HashSet::new(),
         }
     }
 
@@ -762,6 +769,7 @@ impl App {
         }
         self.transcript.push(TranscriptEntry::User(text.to_string()));
         self.streaming_idx = None;
+        self.selected_step = None;
         self.live = crate::live::LiveState::new(self.max_iterations);
         self.live.running = true;
 
@@ -1233,6 +1241,59 @@ impl App {
 
     pub(crate) fn restore_agent(&mut self, agent: Option<Agent>) {
         self.agent_slot = agent;
+    }
+
+    // --- Step selection + expansion ----------------------------------------
+
+    /// Transcript indices that are tool steps, oldest first.
+    pub(crate) fn tool_step_indices(&self) -> Vec<usize> {
+        self.transcript
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, TranscriptEntry::ToolStep { .. }))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Move the selection toward older tool steps (ctrl+↑). Enters at the newest
+    /// step from the unselected state; clamps at the oldest.
+    pub fn select_prev_step(&mut self) {
+        let steps = self.tool_step_indices();
+        let Some(&last) = steps.last() else { return };
+        self.selected_step = Some(match self.selected_step {
+            None => last,
+            Some(cur) => match steps.iter().position(|&i| i == cur) {
+                Some(0) | None => steps[0],
+                Some(pos) => steps[pos - 1],
+            },
+        });
+    }
+
+    /// Move the selection toward newer tool steps (ctrl+↓). Moving past the
+    /// newest returns to the unselected (tail-following) state.
+    pub fn select_next_step(&mut self) {
+        let steps = self.tool_step_indices();
+        let Some(cur) = self.selected_step else { return };
+        self.selected_step = match steps.iter().position(|&i| i == cur) {
+            Some(pos) if pos + 1 < steps.len() => Some(steps[pos + 1]),
+            _ => None,
+        };
+    }
+
+    /// Toggle expansion of the selected step, or the newest step when nothing is
+    /// selected (ctrl+r).
+    pub fn toggle_selected_step(&mut self) {
+        let target = self.selected_step.or_else(|| self.tool_step_indices().last().copied());
+        if let Some(i) = target
+            && !self.expanded_steps.remove(&i)
+        {
+            self.expanded_steps.insert(i);
+        }
+    }
+
+    /// Clear the step selection and resume tail-follow (manual scroll / ctrl+end).
+    pub fn clear_step_selection(&mut self) {
+        self.selected_step = None;
     }
 
     /// Synchronous tail of `/save`: persist the (secret-stripped) connection,
@@ -2029,6 +2090,89 @@ pub mod tests {
         let toml_text = std::fs::read_to_string(store.profile_dir("shop").join("profile.toml")).unwrap();
         assert!(!toml_text.contains("PARAM_SECRET"), "password param must be stripped: {toml_text}");
         assert!(toml_text.contains("sslmode"), "non-secret params preserved");
+    }
+
+    fn running_step(name: &str) -> TranscriptEntry {
+        TranscriptEntry::ToolStep {
+            name: name.into(),
+            sql: Some("SELECT 1".into()),
+            status: StepStatus::Running,
+            summary: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn step_selection_navigates_and_toggles() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![]).await;
+        {
+            let t = app.transcript_mut();
+            t.push(TranscriptEntry::User("q".into())); // 0
+            t.push(running_step("a")); // 1
+            t.push(TranscriptEntry::Reasoning("r".into())); // 2
+            t.push(running_step("b")); // 3
+            t.push(running_step("c")); // 4
+        }
+        assert_eq!(app.selected_step, None);
+
+        // ctrl+up walks newest -> oldest, clamping at the oldest tool step.
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(4));
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(3));
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(1));
+        app.select_prev_step();
+        assert_eq!(app.selected_step, Some(1), "clamps at oldest");
+
+        // ctrl+down walks back toward newest, then off the end to None.
+        app.select_next_step();
+        assert_eq!(app.selected_step, Some(3));
+        app.select_next_step();
+        assert_eq!(app.selected_step, Some(4));
+        app.select_next_step();
+        assert_eq!(app.selected_step, None, "past newest returns to tail-follow");
+
+        // toggle with no selection targets the newest step (index 4).
+        app.toggle_selected_step();
+        assert!(app.expanded_steps.contains(&4));
+        app.toggle_selected_step();
+        assert!(!app.expanded_steps.contains(&4));
+
+        // toggle acts on the selected step.
+        app.select_prev_step(); // 4
+        app.select_prev_step(); // 3
+        app.toggle_selected_step();
+        assert!(app.expanded_steps.contains(&3));
+
+        // manual scroll clears the selection.
+        app.clear_step_selection();
+        assert_eq!(app.selected_step, None);
+    }
+
+    #[tokio::test]
+    async fn start_turn_resets_selection_keeps_expanded() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite:{}", tmp.path().display());
+        let resp = LlmResponse {
+            text: Some("done".into()),
+            tool_calls: vec![],
+            usage: Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+            },
+            stop_reason: "end_turn".into(),
+        };
+        let mut app = make_app(&url, PermissionMode::Wildcard, vec![resp]).await;
+        app.transcript_mut().push(running_step("a")); // index 0
+        app.select_prev_step();
+        app.expanded_steps.insert(0);
+
+        app.start_turn("hi");
+
+        assert_eq!(app.selected_step, None, "start_turn clears the selection");
+        assert!(app.expanded_steps.contains(&0), "expanded steps are preserved");
     }
 
     #[tokio::test]
