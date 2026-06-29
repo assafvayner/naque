@@ -119,7 +119,8 @@ pub fn help_text() -> String {
         "\n\
          Keys:\n\
          \u{20} ←/→ move cursor   Home/End or Ctrl+A/Ctrl+E line start/end   Tab complete\n\
-         \u{20} PgUp/PgDn scroll  Ctrl+End jump to latest   Ctrl+C cancel / quit\n",
+         \u{20} PgUp/PgDn scroll  Ctrl+End back to input   Ctrl+C cancel / quit\n\
+         \u{20} Ctrl+↑/↓ select tool step   Ctrl+R expand/collapse the SQL\n",
     );
     out
 }
@@ -173,5 +174,12 @@ mod tests {
             assert!(text.contains(&c.head()), "help should list {}", c.head());
         }
         assert!(text.contains("Slash commands:"));
+    }
+
+    #[test]
+    fn help_text_documents_step_keys() {
+        let help = help_text();
+        assert!(help.contains("select tool step"), "help must document step navigation:\n{help}");
+        assert!(help.contains("expand/collapse"), "help must document the expand toggle:\n{help}");
     }
 }
