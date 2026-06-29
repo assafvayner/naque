@@ -14,8 +14,9 @@ pub enum AgentEvent {
     LlmCallStarted { iteration: u32 },
     /// A fragment of model-generated text (streamed; may arrive many times).
     TextDelta(String),
-    /// The agent is about to execute a tool call.
-    ToolCallStarted { name: String, sql: Option<String> },
+    /// The agent is about to execute a tool call. `detail` is the SQL (run_query/
+    /// explain), or the target summary (e.g. `"users · limit 10"`), for display.
+    ToolCallStarted { name: String, detail: Option<String> },
     /// A tool call finished. `summary` is a one-line digest of the result.
     ToolCallFinished {
         name: String,

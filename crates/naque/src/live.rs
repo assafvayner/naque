@@ -108,7 +108,7 @@ mod tests {
         assert_eq!(s.iteration, 1);
         s.apply(&AgentEvent::ToolCallStarted {
             name: "run_query".into(),
-            sql: Some("SELECT 1".into()),
+            detail: Some("SELECT 1".into()),
         });
         assert_eq!(s.current_action.as_deref(), Some("run_query"));
         s.apply(&AgentEvent::UsageUpdated(Usage {

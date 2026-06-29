@@ -107,11 +107,11 @@ pub fn apply_event_to_transcript(
                 s.push_str(chunk);
             }
         },
-        AgentEvent::ToolCallStarted { name, sql } => {
+        AgentEvent::ToolCallStarted { name, detail } => {
             *cur = None;
             transcript.push(TranscriptEntry::ToolStep {
                 name: name.clone(),
-                sql: sql.clone(),
+                sql: detail.clone(),
                 status: StepStatus::Running,
                 summary: None,
             });
@@ -284,7 +284,7 @@ mod apply_tests {
             &mut cur,
             &AgentEvent::ToolCallStarted {
                 name: "run_query".into(),
-                sql: Some("SELECT 1".into()),
+                detail: Some("SELECT 1".into()),
             },
         );
         assert!(matches!(
@@ -341,7 +341,7 @@ mod apply_tests {
             &mut cur,
             &AgentEvent::ToolCallStarted {
                 name: "run_query".into(),
-                sql: Some("SELECT 1".into()),
+                detail: Some("SELECT 1".into()),
             },
         );
         apply_event_to_transcript(
@@ -377,7 +377,7 @@ mod apply_tests {
             &mut cur,
             &AgentEvent::ToolCallStarted {
                 name: "run_query".into(),
-                sql: None,
+                detail: None,
             },
         );
         apply_event_to_transcript(&mut t, &mut cur, &AgentEvent::TextDelta("the answer is 5".into()));

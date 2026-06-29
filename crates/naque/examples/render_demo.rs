@@ -291,7 +291,7 @@ async fn build_live_app() -> App {
     app.apply_event(&AgentEvent::TextDelta("Let me check the orders table.".into()));
     app.apply_event(&AgentEvent::ToolCallStarted {
         name: "run_query".into(),
-        sql: Some("SELECT count(*) FROM orders".into()),
+        detail: Some("SELECT count(*) FROM orders".into()),
     });
     app.apply_event(&AgentEvent::UsageUpdated(Usage {
         input_tokens: 1200,
