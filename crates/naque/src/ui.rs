@@ -41,13 +41,13 @@ const QUEUE_MAX_ROWS: usize = 5;
 /// Render one frame of the main UI.
 ///
 /// Layout (top to bottom):
-/// 1. Transcript area — scrollable list of history entries.
-/// 2. Result table — last query result, if any.
-/// 3. Activity line — pinned spinner row while a turn runs (height 0 when idle).
-/// 4. Queued submissions — lines entered while a turn runs, dimmed.
-/// 5. Status bar — single line.
-/// 6. Input line(s) — `> {input}`, wrapped onto multiple rows when needed.
-/// 7. Approval prompt — overlaid as a centered modal when `pending` is Some.
+/// 1. Transcript area — scrollable list of history entries (query results render inline here, so they scroll with the
+///    chat).
+/// 2. Activity line — pinned spinner row while a turn runs (height 0 when idle).
+/// 3. Queued submissions — lines entered while a turn runs, dimmed.
+/// 4. Status bar — single line.
+/// 5. Input line(s) — `> {input}`, wrapped onto multiple rows when needed.
+/// 6. Approval prompt — overlaid as a centered modal when `pending` is Some.
 pub fn render(
     frame: &mut Frame,
     app: &App,
@@ -66,25 +66,20 @@ pub fn render(
     let wrapped = input.wrap(input_text_w);
     let input_rows = (wrapped.rows.len() as u16).clamp(1, INPUT_MAX_ROWS);
 
-    // Determine heights: input = input_rows, status = 1, result = up to 8 if
-    // present, activity = 1 while running, queued = one row per queued line
-    // (capped), transcript = remainder. The approval prompt is not a layout band
-    // — it is drawn as a centered modal popup over the whole screen (below).
-    let has_result = app.last_result().is_some();
-
-    let result_height: u16 = if has_result { 8 } else { 0 };
+    // Determine heights: input = input_rows, status = 1, activity = 1 while
+    // running, queued = one row per queued line (capped), transcript = remainder.
+    // Query results are no longer a pinned band — they render inline in the
+    // transcript so they scroll with the chat. The approval prompt is not a
+    // layout band — it is drawn as a centered modal popup over the whole screen.
     let activity_height: u16 = if app.live.running { 1 } else { 0 };
     let queued_height = queued.len().min(QUEUE_MAX_ROWS) as u16;
     let fixed_bottom: u16 = 1 + input_rows; // status + input
-    let transcript_height = size
-        .height
-        .saturating_sub(fixed_bottom + result_height + activity_height + queued_height);
+    let transcript_height = size.height.saturating_sub(fixed_bottom + activity_height + queued_height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(transcript_height),
-            Constraint::Length(result_height),
             Constraint::Length(activity_height),
             Constraint::Length(queued_height), // queued submissions
             Constraint::Length(1),             // status bar
@@ -148,14 +143,6 @@ pub fn render(
         }
     }
 
-    // ---- Result table -------------------------------------------------------
-    if let (Some(result), true) = (app.last_result(), has_result) {
-        let table = ResultTable::new(result.columns.iter().map(|c| c.name.clone()).collect(), result.rows.clone())
-            .with_byte_columns(app.last_byte_columns().to_vec());
-        let buf = frame.buffer_mut();
-        table.render(theme, chunks[1], buf);
-    }
-
     // ---- Activity line ------------------------------------------------------
     if app.live.running {
         let usage = &app.live.live_usage;
@@ -168,7 +155,7 @@ pub fn render(
             awaiting_approval: app.live.awaiting_approval,
         };
         let buf = frame.buffer_mut();
-        line.render(theme, chunks[2], buf);
+        line.render(theme, chunks[1], buf);
     }
 
     // ---- Status bar --------------------------------------------------------
@@ -187,7 +174,7 @@ pub fn render(
             mark: Some(app.logo().mark_span(theme.color)),
         };
         let buf = frame.buffer_mut();
-        bar.render(theme, chunks[4], buf);
+        bar.render(theme, chunks[3], buf);
     }
 
     // ---- Queued submissions ------------------------------------------------
@@ -205,12 +192,12 @@ pub fn render(
             let more = queued.len() - body;
             lines.push(Line::from(Span::styled(format!("» … {more} more queued"), theme.dim_style())));
         }
-        frame.render_widget(Paragraph::new(lines), chunks[3]);
+        frame.render_widget(Paragraph::new(lines), chunks[2]);
     }
 
     // ---- Input line(s) -----------------------------------------------------
     {
-        let input_chunk = chunks[5];
+        let input_chunk = chunks[4];
         let rows_shown = input_rows as usize;
         let total = wrapped.rows.len();
         // Window the wrapped rows so the cursor row stays visible when the input
@@ -371,6 +358,9 @@ fn agent_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
 /// Logical SQL lines shown before truncation in a collapsed running step.
 const SQL_PREVIEW_LINES: usize = 5;
 
+/// Data rows shown for a result table before it is collapsed (ctrl+r expands).
+const RESULT_PREVIEW_ROWS: usize = 10;
+
 /// Tools whose `detail` is a SQL statement rendered as a multi-line block.
 fn is_sql_tool(name: &str) -> bool {
     matches!(name, "run_query" | "explain")
@@ -511,7 +501,59 @@ fn transcript_lines<'a>(
             status,
             summary,
         } => tool_step_lines(name, detail.as_deref(), status, summary.as_deref(), expanded, selected, width, theme),
+        TranscriptEntry::Result {
+            columns,
+            rows,
+            byte_columns,
+        } => result_lines(columns, rows, byte_columns, expanded, selected, width, theme),
     }
+}
+
+/// Lines for an inline result table: a `❯`/two-space marker on the header, a
+/// `RESULT_PREVIEW_ROWS`-row preview (all rows when `expanded`), and a trailing
+/// hint when there are more rows than shown.
+fn result_lines(
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+    byte_columns: &[usize],
+    expanded: bool,
+    selected: bool,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    // Indent the table two columns so it aligns under the chat gutter; the
+    // marker occupies that indent on the header row when selected.
+    const INDENT: &str = "  ";
+    let indent_w = INDENT.len() as u16;
+    let table = ResultTable::new(columns.to_vec(), rows.to_vec()).with_byte_columns(byte_columns.to_vec());
+    let cap = (!expanded).then_some(RESULT_PREVIEW_ROWS);
+    let body = table.lines(cap, width.saturating_sub(indent_w));
+
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(body.len() + 1);
+    for (i, line) in body.into_iter().enumerate() {
+        let lead = if i == 0 && selected {
+            Span::styled("❯ ", theme.activity_style())
+        } else {
+            Span::raw(INDENT)
+        };
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        spans.push(lead);
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+
+    let total = rows.len();
+    if !expanded && total > RESULT_PREVIEW_ROWS {
+        let more = total - RESULT_PREVIEW_ROWS;
+        out.push(Line::from(Span::styled(
+            format!("  … +{more} more row{} · ctrl+r to expand", if more == 1 { "" } else { "s" }),
+            theme.dim_style(),
+        )));
+    } else if expanded && total > RESULT_PREVIEW_ROWS {
+        out.push(Line::from(Span::styled("  ctrl+r to collapse", theme.dim_style())));
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,18 +1434,13 @@ mod tests {
     async fn render_basic_frame() {
         let mut app = make_test_app().await;
 
-        // Push transcript entries.
+        // Push transcript entries, including an inline result table.
         app.transcript.push(TranscriptEntry::User("hello world".into()));
         app.transcript.push(TranscriptEntry::Agent("hi there".into()));
-
-        // Set a result (fabricate a QueryResult).
-        app.last_result = Some(naque_db::QueryResult {
-            columns: vec![naque_db::Column {
-                name: "id".into(),
-                type_name: "integer".into(),
-            }],
+        app.transcript.push(TranscriptEntry::Result {
+            columns: vec!["id".into()],
             rows: vec![vec![Some("42".into())]],
-            rows_affected: None,
+            byte_columns: Vec::new(),
         });
 
         let theme = Theme::new(false);
@@ -1891,6 +1928,33 @@ mod render_tests {
             &theme,
         );
         assert_eq!(line_text(&l[0]), "  ▸ sample_table users \u{00B7} limit 10");
+    }
+
+    #[test]
+    fn result_entry_previews_rows_and_expands() {
+        let theme = Theme::new(false);
+        let cols = vec!["n".to_string()];
+        let rows: Vec<Vec<Option<String>>> = (0..25).map(|i| vec![Some(i.to_string())]).collect();
+        let entry = TranscriptEntry::Result {
+            columns: cols,
+            rows,
+            byte_columns: Vec::new(),
+        };
+
+        // Collapsed: header + sep + 10 rows + "+15 more" hint = 13 lines.
+        let lines = transcript_lines(&entry, &theme, false, false, 80);
+        assert_eq!(lines.len(), 2 + RESULT_PREVIEW_ROWS + 1);
+        assert!(line_text(lines.last().unwrap()).contains("+15 more rows"), "{:?}", line_text(lines.last().unwrap()));
+        assert!(line_text(lines.last().unwrap()).contains("ctrl+r to expand"));
+
+        // Expanded: header + sep + 25 rows + collapse hint = 28 lines.
+        let lines = transcript_lines(&entry, &theme, true, false, 80);
+        assert_eq!(lines.len(), 2 + 25 + 1);
+        assert!(line_text(lines.last().unwrap()).contains("ctrl+r to collapse"));
+
+        // Selected: the header row carries the ❯ marker.
+        let lines = transcript_lines(&entry, &theme, false, true, 80);
+        assert!(line_text(&lines[0]).starts_with("❯ "), "{:?}", line_text(&lines[0]));
     }
 
     #[test]

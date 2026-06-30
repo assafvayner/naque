@@ -144,6 +144,9 @@ fn render_entry(e: &TranscriptEntry) {
             let detail = summary.as_deref().unwrap_or("");
             println!("  ▸ {name} {detail}");
         },
+        TranscriptEntry::Result { columns, rows, .. } => {
+            println!("  Result: {} column(s), {} row(s)", columns.len(), rows.len());
+        },
     }
 }
 

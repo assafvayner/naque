@@ -46,7 +46,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "clear",
         args: "",
-        help: "clear the agent's conversation memory",
+        help: "clear the chat window and the agent's conversation memory",
     },
     SlashCommand {
         name: "cost",

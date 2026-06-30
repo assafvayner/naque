@@ -42,10 +42,21 @@ execution safe by default: the LLM is never in the security path.
 
 ## Installation
 
-`naque` is a Rust workspace. Build it with a recent stable toolchain (MSRV 1.79):
+Install the `naque` binary straight from the repo with a recent stable toolchain
+(MSRV 1.95):
 
 ```bash
-git clone <repo-url> naque
+cargo install --git https://github.com/assafvayner/naque naque
+```
+
+This builds the whole workspace and drops the `naque` binary into `~/.cargo/bin`
+(ensure it's on your `PATH`). No system OpenSSL is required (TLS is via rustls); SQLite
+is bundled.
+
+### From a clone
+
+```bash
+git clone https://github.com/assafvayner/naque
 cd naque
 cargo build --release
 # binary at target/release/naque
@@ -56,8 +67,6 @@ Run directly during development:
 ```bash
 cargo run -p naque -- --url postgres://user@localhost/mydb
 ```
-
-No system OpenSSL is required (TLS is via rustls); SQLite is bundled.
 
 ## Usage
 

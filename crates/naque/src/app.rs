@@ -75,6 +75,14 @@ pub enum TranscriptEntry {
         status: StepStatus,
         summary: Option<String>,
     },
+    /// A query result table, rendered inline so it scrolls with the chat.
+    /// Shows a capped row preview by default, expandable via ctrl+r.
+    Result {
+        columns: Vec<String>,
+        rows: Vec<Vec<Option<String>>>,
+        /// Column indices rendered with a byte-size suffix.
+        byte_columns: Vec<usize>,
+    },
 }
 
 /// Fold one [`AgentEvent`] into the transcript. `cur` is the index of the
@@ -541,6 +549,17 @@ impl App {
         self.transcript.push(TranscriptEntry::Info(msg.into()));
     }
 
+    /// Push a query result into the transcript so it scrolls inline with the
+    /// chat. `result` should already be row-capped; `byte_columns` flags integer
+    /// columns rendered with a human-friendly byte-size suffix.
+    fn push_result(&mut self, result: &QueryResult, byte_columns: Vec<usize>) {
+        self.transcript.push(TranscriptEntry::Result {
+            columns: result.columns.iter().map(|c| c.name.clone()).collect(),
+            rows: result.rows.clone(),
+            byte_columns,
+        });
+    }
+
     /// Install the profile store and the active profile/env identity (called by
     /// `setup` at launch and by `switch_to`).
     pub fn set_active_profile(
@@ -675,12 +694,13 @@ impl App {
                     capped.rows.truncate(self.row_cap);
                 }
 
-                self.last_result = Some(capped);
+                self.last_result = Some(capped.clone());
                 self.last_byte_columns = Vec::new();
                 self.transcript.push(TranscriptEntry::Sql {
                     sql: sql.to_string(),
                     label,
                 });
+                self.push_result(&capped, Vec::new());
                 Ok(result)
             },
             Err(msg) => {
@@ -737,15 +757,19 @@ impl App {
 
         let turn = result?;
         self.usage += turn.usage;
-        if let Some(r) = exec_last {
+        let capped_result = exec_last.map(|r| {
             let mut capped = r;
             if capped.rows.len() > self.row_cap {
                 capped.rows.truncate(self.row_cap);
             }
-            self.last_result = Some(capped);
-            self.last_byte_columns = exec_byte_cols;
-        }
+            self.last_result = Some(capped.clone());
+            self.last_byte_columns = exec_byte_cols.clone();
+            capped
+        });
         self.transcript.push(TranscriptEntry::Agent(turn.answer));
+        if let Some(capped) = capped_result {
+            self.push_result(&capped, exec_byte_cols);
+        }
         Ok(())
     }
 
@@ -880,8 +904,9 @@ impl App {
                     if capped.rows.len() > self.row_cap {
                         capped.rows.truncate(self.row_cap);
                     }
-                    self.last_result = Some(capped);
-                    self.last_byte_columns = out.last_byte_columns;
+                    self.last_result = Some(capped.clone());
+                    self.last_byte_columns = out.last_byte_columns.clone();
+                    self.push_result(&capped, out.last_byte_columns);
                 }
                 match out.result {
                     Ok(turn) => {
@@ -1007,6 +1032,13 @@ impl App {
             if let Some(a) = self.agent_slot.as_mut() {
                 a.clear();
             }
+            // Wipe the chat window too. Clearing the transcript invalidates every
+            // transcript-relative index, so reset the step selection, expansions,
+            // and any in-progress streaming entry alongside it.
+            self.transcript.clear();
+            self.selected_step = None;
+            self.expanded_steps.clear();
+            self.streaming_idx = None;
             self.transcript.push(TranscriptEntry::Info("agent memory cleared".to_string()));
             return Ok(());
         }
@@ -1245,12 +1277,13 @@ impl App {
 
     // --- Step selection + expansion ----------------------------------------
 
-    /// Transcript indices that are tool steps, oldest first.
+    /// Transcript indices of entries that can be selected/expanded (tool steps
+    /// and result tables), oldest first.
     pub(crate) fn tool_step_indices(&self) -> Vec<usize> {
         self.transcript
             .iter()
             .enumerate()
-            .filter(|(_, e)| matches!(e, TranscriptEntry::ToolStep { .. }))
+            .filter(|(_, e)| matches!(e, TranscriptEntry::ToolStep { .. } | TranscriptEntry::Result { .. }))
             .map(|(i, _)| i)
             .collect()
     }
@@ -1695,13 +1728,16 @@ pub mod tests {
             .any(|e| matches!(e, TranscriptEntry::Info(s) if s.contains("tokens")));
         assert!(has_cost, "transcript should contain token info");
 
-        // /clear
+        // /clear wipes the chat window, leaving only the confirmation entry.
+        app.selected_step = Some(0);
         app.handle_line("/clear", &mut AutoApprove).await.unwrap();
+        assert_eq!(app.transcript().len(), 1, "/clear should wipe prior transcript entries");
         let has_clear = app
             .transcript()
             .iter()
             .any(|e| matches!(e, TranscriptEntry::Info(s) if s.contains("cleared")));
         assert!(has_clear, "transcript should contain cleared info");
+        assert_eq!(app.selected_step, None, "/clear should reset the step selection");
 
         // /quit
         assert!(!app.should_quit());

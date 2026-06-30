@@ -225,6 +225,65 @@ impl ResultTable {
         }
     }
 
+    /// Render the table as owned, styled lines for inline display in the
+    /// scrolling transcript: a bold header, a separator sized to the table, then
+    /// up to `max_rows` data rows (all rows when `max_rows` is `None`).
+    ///
+    /// Each line is truncated to `width` display columns so a wide table clips
+    /// rather than soft-wrapping and blowing the transcript's height budget
+    /// (mirroring how the running-SQL block truncates long lines).
+    pub fn lines(&self, max_rows: Option<usize>, width: u16) -> Vec<Line<'static>> {
+        let width = width as usize;
+        if width == 0 {
+            return Vec::new();
+        }
+
+        let widths = self.column_widths();
+        let table_width: usize = widths.iter().sum::<usize>() + SEP.len() * widths.len().saturating_sub(1);
+        let mut out: Vec<Line<'static>> = Vec::new();
+
+        // Header row (bold).
+        let header: Vec<Span<'static>> = self
+            .columns
+            .iter()
+            .enumerate()
+            .flat_map(|(i, col)| {
+                let sep = if i == 0 { "" } else { SEP };
+                let w = widths.get(i).copied().unwrap_or_else(|| display_len(col));
+                vec![
+                    Span::raw(sep),
+                    Span::styled(pad_or_truncate(col, w), Style::default().add_modifier(Modifier::BOLD)),
+                ]
+            })
+            .collect();
+        out.push(Line::from(truncate_spans(header, width)));
+
+        // Separator — sized to the actual table width, clamped to the area.
+        out.push(Line::from(Span::raw("-".repeat(table_width.min(width)))));
+
+        // Data rows.
+        let dim_style = Style::default().add_modifier(Modifier::DIM);
+        let limit = max_rows.unwrap_or(self.rows.len());
+        for row in self.rows.iter().take(limit) {
+            let cells: Vec<Span<'static>> = row
+                .iter()
+                .enumerate()
+                .flat_map(|(i, cell)| {
+                    let sep = if i == 0 { "" } else { SEP };
+                    let w = widths.get(i).copied().unwrap_or(0);
+                    let cell_span = match cell {
+                        Some(v) => Span::raw(pad_or_truncate(&self.display_cell(i, v), w)),
+                        None => Span::styled(pad_or_truncate(NULL_TEXT, w), dim_style),
+                    };
+                    vec![Span::raw(sep), cell_span]
+                })
+                .collect();
+            out.push(Line::from(truncate_spans(cells, width)));
+        }
+
+        out
+    }
+
     /// Export as RFC 4180-ish CSV.
     ///
     /// - Header row comes first.
@@ -271,6 +330,35 @@ impl ResultTable {
             .collect();
         serde_json::to_string(&serde_json::Value::Array(objects)).expect("serializing owned data should never fail")
     }
+}
+
+/// Truncate a sequence of spans to at most `max` display columns, replacing the
+/// final visible character with an ellipsis when content is cut. Span styles are
+/// preserved up to the cut point.
+fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    let total: usize = spans.iter().map(|s| display_len(&s.content)).sum();
+    if total <= max {
+        return spans;
+    }
+    if max == 0 {
+        return Vec::new();
+    }
+    let budget = max - 1; // leave one column for the ellipsis
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let len = display_len(&span.content);
+        if used + len <= budget {
+            used += len;
+            out.push(span);
+        } else {
+            let mut s: String = span.content.chars().take(budget - used).collect();
+            s.push('…');
+            out.push(Span::styled(s, span.style));
+            break;
+        }
+    }
+    out
 }
 
 /// Build a single CSV row from an iterator of field strings.
@@ -519,6 +607,41 @@ mod tests {
         assert_eq!(dashes, 9, "separator should be table width 9, got {dashes}");
         // Beyond the table width the separator row must be blank.
         assert!(sep_row[9..].chars().all(|c| c == ' '), "separator must not span full area width: {sep_row:?}");
+    }
+
+    // --- lines (inline transcript rendering) ---
+
+    fn line_text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn lines_header_separator_and_rows() {
+        let lines = table().lines(None, 40);
+        // header + separator + 2 data rows.
+        assert_eq!(lines.len(), 4);
+        assert!(line_text(&lines[0]).contains("id"));
+        assert!(line_text(&lines[0]).contains("name"));
+        assert!(line_text(&lines[1]).starts_with('-'));
+        assert!(line_text(&lines[2]).contains('1'));
+        assert!(line_text(&lines[3]).contains("NULL"), "null cell renders as NULL: {:?}", line_text(&lines[3]));
+    }
+
+    #[test]
+    fn lines_caps_rows_to_max() {
+        let rows: Vec<Vec<Option<String>>> = (0..50).map(|i| vec![Some(i.to_string())]).collect();
+        let t = ResultTable::new(vec!["n".into()], rows);
+        // header + separator + 10 capped rows = 12.
+        assert_eq!(t.lines(Some(10), 40).len(), 12);
+    }
+
+    #[test]
+    fn lines_truncates_wide_row_to_width() {
+        let t = ResultTable::new(vec!["c".into()], vec![vec![Some("x".repeat(100))]]);
+        let lines = t.lines(None, 20);
+        let row = line_text(&lines[2]);
+        assert!(row.chars().count() <= 20, "row exceeds width: {}", row.chars().count());
+        assert!(row.ends_with('…'), "truncated row ends with ellipsis: {row:?}");
     }
 
     // --- pad_or_truncate ---
