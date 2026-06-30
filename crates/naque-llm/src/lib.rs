@@ -13,7 +13,7 @@ mod tests;
 
 pub use agent::{Agent, AgentConfig, TurnResult};
 pub use error::LlmError;
-pub use mock::{MockExecutor, MockProvider, PendingProvider, ScriptedStreamProvider};
+pub use mock::{MockExecutor, MockProvider, PendingExecutor, PendingProvider, ScriptedStreamProvider};
 pub use observer::{AgentEvent, AgentObserver, RecordingObserver, summarize_tool_result};
 pub use provider::{LlmProvider, TextSink, ToolExecutor};
 pub use providers::{ClaudeProvider, GeminiProvider, HfProvider, OllamaProvider, OpenAIProvider};

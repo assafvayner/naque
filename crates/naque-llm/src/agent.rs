@@ -152,9 +152,27 @@ impl Agent {
                     name: call.name.clone(),
                     detail: tool_call_detail(call),
                 });
-                let (content, is_error) = match executor.execute(call).await {
-                    Ok(content) => (content, false),
-                    Err(e) => (e.to_string(), true),
+                // Race the tool call against cancellation. A query that hangs in
+                // the driver (e.g. a proxy that never honors the kill) must not
+                // wedge the turn: on cancel we abandon the in-flight future —
+                // dropping it releases the query client-side — then roll back and
+                // return promptly, exactly as the streaming-call race above does.
+                let outcome = {
+                    let exec = executor.execute(call);
+                    tokio::pin!(exec);
+                    tokio::select! {
+                        r = &mut exec => Some(r),
+                        _ = cancel.cancelled() => None,
+                    }
+                };
+                let (content, is_error) = match outcome {
+                    Some(Ok(content)) => (content, false),
+                    Some(Err(e)) => (e.to_string(), true),
+                    None => {
+                        self.conversation.truncate(start_len);
+                        observer.on_event(AgentEvent::Cancelled);
+                        return Ok(cancelled_result(iterations, tool_invocations, usage));
+                    },
                 };
                 observer.on_event(AgentEvent::ToolCallFinished {
                     name: call.name.clone(),
@@ -344,6 +362,47 @@ mod observer_tests {
 
         assert!(out.cancelled);
         assert_eq!(agent.history_len(), before);
+        assert_eq!(obs.events.last(), Some(&AgentEvent::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn cancel_during_tool_call_interrupts_and_rolls_back() {
+        use crate::PendingExecutor;
+        // The provider returns a tool call, then the executor hangs forever
+        // (a query stuck in an unresponsive driver/proxy). Cancel must still
+        // return the turn promptly and roll the conversation back.
+        let resp = LlmResponse {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "t1".into(),
+                name: "run_query".into(),
+                input: serde_json::json!({ "sql": "SELECT pg_sleep(9999)" }),
+            }],
+            usage: Usage::default(),
+            stop_reason: "tool_use".into(),
+        };
+        let mut agent = Agent::new(Box::new(MockProvider::new(vec![resp])), cfg());
+        let mut exec = PendingExecutor;
+        let mut obs = RecordingObserver::default();
+        let cancel = CancellationToken::new();
+        let before = agent.history_len();
+
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            token.cancel();
+        });
+
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_turn("hi", "cat", &mut exec, &mut obs, &cancel),
+        )
+        .await
+        .expect("run_turn must return promptly even when the tool call hangs")
+        .unwrap();
+
+        assert!(out.cancelled);
+        assert_eq!(agent.history_len(), before, "conversation rolled back to boundary");
         assert_eq!(obs.events.last(), Some(&AgentEvent::Cancelled));
     }
 

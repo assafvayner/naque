@@ -233,14 +233,25 @@ async fn complete_once_returns_text_without_tools() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: standard_tools returns the 4 expected tools
+// Test 6: standard_tools returns the expected tools
 // ---------------------------------------------------------------------------
 #[test]
 fn test_standard_tools() {
     let tools = standard_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-    assert_eq!(names, vec!["inspect_table", "sample_table", "explain", "run_query"]);
+    assert_eq!(
+        names,
+        vec![
+            "inspect_table",
+            "sample_table",
+            "explain",
+            "run_query",
+            "read_file",
+            "list_directory",
+            "web_fetch",
+        ]
+    );
 
     for tool in &tools {
         assert!(!tool.name.is_empty());

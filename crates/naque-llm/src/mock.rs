@@ -29,6 +29,22 @@ impl LlmProvider for PendingProvider {
 }
 
 // ---------------------------------------------------------------------------
+// PendingExecutor
+// ---------------------------------------------------------------------------
+
+/// Test executor whose `execute` never completes on its own — it awaits forever,
+/// so a cancellation race can interrupt a tool call mid-flight (the analogue of
+/// a query stuck in an unresponsive driver/proxy).
+pub struct PendingExecutor;
+
+#[async_trait::async_trait]
+impl ToolExecutor for PendingExecutor {
+    async fn execute(&mut self, _call: &ToolCall) -> Result<String, LlmError> {
+        std::future::pending().await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MockProvider
 // ---------------------------------------------------------------------------
 

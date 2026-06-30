@@ -429,6 +429,7 @@ pub struct App {
     pub(crate) inflight: Option<crate::turn::RunningTurn>,
     pub(crate) event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<naque_llm::AgentEvent>>,
     pub(crate) approval_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::approval::ApprovalRequest>>,
+    pub(crate) path_approval_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::approval::PathApprovalRequest>>,
     pub(crate) store: Option<naque_profile::Store>,
     pub(crate) active_profile: Option<String>,
     pub(crate) active_env: Option<String>,
@@ -442,6 +443,12 @@ pub struct App {
     pub(crate) selected_step: Option<usize>,
     /// Transcript indices of tool steps the user has expanded.
     pub(crate) expanded_steps: HashSet<usize>,
+    /// Allowed filesystem read globs (the FS permission dimension). Shared with
+    /// the per-turn executor; mutated by `/allow-dir`. Uses a std mutex so the
+    /// sync command path can lock it without `.await`.
+    pub(crate) fs_access: Arc<std::sync::Mutex<crate::fs_access::FsAccess>>,
+    /// Whether `web_fetch` is enabled (resolved `web_access` config).
+    pub(crate) web_access: bool,
 }
 
 impl App {
@@ -474,6 +481,7 @@ impl App {
             inflight: None,
             event_rx: None,
             approval_rx: None,
+            path_approval_rx: None,
             store: None,
             active_profile: None,
             active_env: None,
@@ -484,7 +492,31 @@ impl App {
             logo: Logo::new(0),
             selected_step: None,
             expanded_steps: HashSet::new(),
+            // Empty allow-list rooted at the CWD by default; the binary installs
+            // the resolved config via `set_fs_access`. web_fetch on by default.
+            fs_access: Arc::new(std::sync::Mutex::new(crate::fs_access::FsAccess::new(
+                std::env::current_dir().unwrap_or_default(),
+                &[],
+            ))),
+            web_access: true,
         }
+    }
+
+    /// Install the resolved filesystem allow-list (from `read_paths` config,
+    /// rooted at the project/CWD) and the `web_access` flag. Called by the
+    /// binary after config resolution.
+    pub fn set_fs_access(&mut self, fs_access: crate::fs_access::FsAccess) {
+        self.fs_access = Arc::new(std::sync::Mutex::new(fs_access));
+    }
+
+    pub fn set_web_access(&mut self, enabled: bool) {
+        self.web_access = enabled;
+    }
+
+    /// Add an in-session filesystem grant (the `/allow-dir` command). Not
+    /// persisted. Returns an error if `glob` is not a valid pattern.
+    pub fn allow_dir(&self, glob: &str) -> Result<(), glob::PatternError> {
+        self.fs_access.lock().unwrap().allow(glob)
     }
 
     // --- Accessors ---------------------------------------------------------
@@ -748,6 +780,8 @@ impl App {
             approver,
             last_result: None,
             last_byte_columns: Vec::new(),
+            fs_access: Arc::clone(&self.fs_access),
+            web_access: self.web_access,
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = agent.run_turn(text, &context, &mut executor, &mut (), &cancel).await;
@@ -803,6 +837,7 @@ impl App {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (path_approval_tx, path_approval_rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let db = std::sync::Arc::clone(&self.db);
@@ -811,10 +846,12 @@ impl App {
         let guard = self.catastrophic_guard;
         let input = text.to_string();
         let cancel_task = cancel.clone();
+        let fs_access = Arc::clone(&self.fs_access);
+        let web_access = self.web_access;
 
         let handle = tokio::spawn(async move {
             let mut observer = crate::turn::ChannelObserver::new(event_tx);
-            let mut approver = crate::approval::ChannelApprover::new(approval_tx);
+            let mut approver = crate::approval::ChannelApprover::new(approval_tx, path_approval_tx);
             let mut executor = crate::executor::QueryToolExecutor {
                 db,
                 mode,
@@ -823,6 +860,8 @@ impl App {
                 approver: &mut approver,
                 last_result: None,
                 last_byte_columns: Vec::new(),
+                fs_access,
+                web_access,
             };
             let result = agent
                 .run_turn(&input, &context, &mut executor, &mut observer, &cancel_task)
@@ -840,6 +879,7 @@ impl App {
         self.inflight = Some(crate::turn::RunningTurn { handle, cancel });
         self.event_rx = Some(event_rx);
         self.approval_rx = Some(approval_rx);
+        self.path_approval_rx = Some(path_approval_rx);
     }
 
     pub fn is_turn_running(&self) -> bool {
@@ -882,6 +922,11 @@ impl App {
         self.approval_rx.as_mut().and_then(|rx| rx.try_recv().ok())
     }
 
+    /// Take the next pending filesystem-access request from a running turn.
+    pub fn try_recv_path_approval(&mut self) -> Option<crate::approval::PathApprovalRequest> {
+        self.path_approval_rx.as_mut().and_then(|rx| rx.try_recv().ok())
+    }
+
     /// Reclaim the agent + results after the task has finished.
     pub async fn finalize_turn(&mut self) {
         let Some(t) = self.inflight.take() else { return };
@@ -895,6 +940,7 @@ impl App {
         }
         self.event_rx = None;
         self.approval_rx = None;
+        self.path_approval_rx = None;
 
         match out {
             Ok(out) => {
@@ -911,6 +957,25 @@ impl App {
                 match out.result {
                     Ok(turn) => {
                         self.usage += turn.usage;
+                        // A cancel may have abandoned a query mid-protocol, leaving the
+                        // connection unusable (the server/proxy may still be running it).
+                        // Dial a fresh connection so the next statement doesn't hang on
+                        // it; bounded so an unresponsive endpoint can't wedge finalize.
+                        if turn.cancelled {
+                            let outcome = {
+                                let mut db = self.db.lock().await;
+                                tokio::time::timeout(std::time::Duration::from_secs(10), db.reconnect()).await
+                            };
+                            match outcome {
+                                Ok(Ok(())) => {},
+                                Ok(Err(e)) => self
+                                    .transcript
+                                    .push(TranscriptEntry::Error(format!("reconnect after cancel failed: {e}"))),
+                                Err(_) => self
+                                    .transcript
+                                    .push(TranscriptEntry::Error("reconnect after cancel timed out".to_string())),
+                            }
+                        }
                     },
                     Err(e) => {
                         self.transcript.push(TranscriptEntry::Error(e.to_string()));
@@ -1142,6 +1207,24 @@ impl App {
             return self
                 .save_profile_command(cmd.strip_prefix("save").map(str::trim).unwrap_or(""))
                 .await;
+        }
+
+        if cmd == "allow-dir" || cmd.starts_with("allow-dir ") {
+            let glob = cmd.strip_prefix("allow-dir").map(str::trim).unwrap_or("");
+            if glob.is_empty() {
+                self.transcript
+                    .push(TranscriptEntry::Info("usage: /allow-dir <path-or-glob>".to_string()));
+            } else {
+                match self.allow_dir(glob) {
+                    Ok(()) => self.transcript.push(TranscriptEntry::Info(format!(
+                        "granted filesystem read access for this session: {glob}"
+                    ))),
+                    Err(e) => self
+                        .transcript
+                        .push(TranscriptEntry::Error(format!("invalid glob {glob:?}: {e}"))),
+                }
+            }
+            return Ok(());
         }
 
         // Silence the unused parameter warning in the non-NL paths.

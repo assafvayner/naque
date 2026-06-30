@@ -229,6 +229,18 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     // 11. Construct App (schema loaded lazily via /learn).
     let mut app = App::new(db, agent, mode, profile_name, catastrophic_guard, row_cap);
     app.set_logo(Logo::from_entropy()); // fresh pixel-art look each session
+
+    // Filesystem read allow-list (a permission dimension separate from `mode`)
+    // and web access, both from resolved config. Relative `read_paths` globs
+    // resolve against the project directory (the dir holding `naque.toml`) when
+    // there is one, else the current working directory.
+    let fs_base = resolved
+        .local_toml_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let read_paths = resolved.config.read_paths.clone().unwrap_or_default();
+    app.set_fs_access(naque::FsAccess::new(fs_base, &read_paths));
+    app.set_web_access(resolved.config.web_access_enabled());
     app.set_active_profile(store.clone(), active_profile_name.clone(), active_env, active_connection);
     if let Some(p) = &active_profile_name {
         if let Ok(Some(model)) = naque_schema::load_schema(&store.profile_dir(p)) {

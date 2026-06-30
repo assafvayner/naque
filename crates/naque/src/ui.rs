@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::StreamExt;
-use naque_tui::{ActivityLine, ApprovalPrompt, History, InputLine, ResultTable, StatusBar, Theme};
+use naque_tui::{
+    ActivityLine, ApprovalPrompt, History, InputLine, PathChoice, PathPrompt, ResultTable, StatusBar, Theme,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::ExecutableCommand;
 use ratatui::crossterm::event::{
@@ -18,7 +20,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::app::{App, TranscriptEntry};
-use crate::approval::{ApprovalDecision, ApprovalRequest};
+use crate::approval::{ApprovalDecision, ApprovalRequest, PathApprovalRequest, PathGrant};
 
 /// Rough cost estimate for the default model (claude-opus-4-8):
 /// $5 per 1M input tokens, $25 per 1M output tokens.
@@ -55,6 +57,7 @@ pub fn render(
     input: &InputLine,
     queued: &[String],
     pending: Option<&ApprovalPrompt>,
+    path_pending: Option<&PathPrompt>,
 ) {
     let size = frame.area();
     let prefix_w = INPUT_PREFIX.len() as u16;
@@ -262,6 +265,25 @@ pub fn render(
         let buf = frame.buffer_mut();
         prompt.render(theme, inner, buf);
     }
+
+    // ---- Filesystem-access prompt (centered modal popup) -------------------
+    // Same modal treatment as the SQL approval prompt. Both are never up at
+    // once (the agent awaits one tool's reply before the next), but if they
+    // were, the SQL modal is drawn last above; here the path modal renders when
+    // there is no SQL prompt.
+    if pending.is_none()
+        && let Some(prompt) = path_pending
+    {
+        let modal = centered_path_modal_rect(size, prompt);
+        frame.render_widget(Clear, modal);
+
+        let block = Block::default().borders(Borders::ALL).title(" Filesystem access ");
+        let inner = block.inner(modal);
+        frame.render_widget(block, modal);
+
+        let buf = frame.buffer_mut();
+        prompt.render(theme, inner, buf);
+    }
 }
 
 /// Render the fresh-session welcome splash into `area`: the speckled NAQUE
@@ -316,6 +338,22 @@ fn centered_modal_rect(area: Rect, prompt: &ApprovalPrompt) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
 
+    Rect { x, y, width, height }
+}
+
+/// Compute a centered [`Rect`] for the filesystem-access modal, sized to fit
+/// its content (header + blank + path lines + blank + 3 options) plus borders.
+fn centered_path_modal_rect(area: Rect, prompt: &PathPrompt) -> Rect {
+    let path_lines = prompt.path_line_count().max(1) as u16;
+    let content_height = 1 + 1 + path_lines + 1 + 3;
+    let height = (content_height + 2).min(area.height.max(1));
+
+    let widest = prompt.content_width() as u16 + 4;
+    let max_w = area.width.saturating_sub(4).max(1);
+    let width = widest.clamp(20.min(max_w), 80.min(max_w)).min(max_w);
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect { x, y, width, height }
 }
 
@@ -658,6 +696,8 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(80));
     let mut pending: Option<(ApprovalRequest, ApprovalPrompt)> = None;
+    // Filesystem-access prompt (FS permission dimension), parallel to `pending`.
+    let mut pending_path: Option<(PathApprovalRequest, PathPrompt)> = None;
     // Slash-command autocomplete: highlighted row + an Esc-dismissed flag.
     let mut suggest_selected: usize = 0;
     let mut suggest_dismissed = false;
@@ -672,7 +712,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
         // Build the autocomplete popup for this frame, if it should show. Shown
         // even while a turn runs, since the input stays editable (e.g. to queue
         // a slash command). Suppressed only while an approval modal owns focus.
-        let suggest = if pending.is_none() && !suggest_dismissed {
+        let suggest = if pending.is_none() && pending_path.is_none() && !suggest_dismissed {
             let matches = slash_suggest_prefix(input.text()).map(naque_tui::matching).unwrap_or_default();
             (!matches.is_empty()).then(|| naque_tui::SlashSuggest::new(matches, suggest_selected))
         } else {
@@ -681,8 +721,9 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
 
         {
             let prompt_ref = pending.as_ref().map(|(_, p)| p);
+            let path_prompt_ref = pending_path.as_ref().map(|(_, p)| p);
             terminal.draw(|f| {
-                render(f, app, theme, &input, &queued, prompt_ref);
+                render(f, app, theme, &input, &queued, prompt_ref, path_prompt_ref);
                 if let Some(sg) = suggest.as_ref() {
                     render_suggest_popup(f, theme, sg);
                 }
@@ -694,7 +735,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 // Mouse wheel scrolls the transcript. Ignored while an approval
                 // modal owns focus (consistent with key routing below).
                 if let Some(Ok(Event::Mouse(m))) = &maybe_ev {
-                    if pending.is_none() {
+                    if pending.is_none() && pending_path.is_none() {
                         match m.kind {
                             MouseEventKind::ScrollUp => {
                                 app.clear_step_selection();
@@ -723,6 +764,25 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                         let (req, _) = pending.take().unwrap();
                         let decision = approval_choice_to_decision(choice, &req.sql, terminal, app, theme);
                         let _ = req.reply.send(decision);
+                    }
+                    continue;
+                }
+
+                // Filesystem-access modal active: route keys to the path prompt.
+                if let Some((_, prompt)) = pending_path.as_mut() {
+                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        let (req, _) = pending_path.take().unwrap();
+                        let _ = req.reply.send(PathGrant::Deny);
+                        continue;
+                    }
+                    if let Some(choice) = prompt.handle_key(key) {
+                        let (req, _) = pending_path.take().unwrap();
+                        let grant = match choice {
+                            PathChoice::Once => PathGrant::Once,
+                            PathChoice::Session => PathGrant::Session,
+                            PathChoice::Deny => PathGrant::Deny,
+                        };
+                        let _ = req.reply.send(grant);
                     }
                     continue;
                 }
@@ -812,6 +872,9 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                     KeyCode::Up if ctrl => app.select_prev_step(),
                     KeyCode::Down if ctrl => app.select_next_step(),
                     KeyCode::Char('r') if ctrl => app.toggle_selected_step(),
+                    // Right toggles the selected step too (a step must be selected,
+                    // otherwise Right falls through to input-cursor movement below).
+                    KeyCode::Right if app.selected_step.is_some() => app.toggle_selected_step(),
                     // --- input editing (always available, even while a turn runs) ---
                     KeyCode::Left => input.move_left(),
                     KeyCode::Right => input.move_right(),
@@ -855,7 +918,7 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
             // 20ms for the whole time the user reads the prompt. When the user
             // decides and `pending` clears, draining resumes (the unbounded
             // channel buffers any events produced meanwhile, so nothing is lost).
-            step = turn_step(app), if app.is_turn_running() && pending.is_none() => {
+            step = turn_step(app), if app.is_turn_running() && pending.is_none() && pending_path.is_none() => {
                 match step {
                     // A streamed event arrived — fold it into transcript + live state.
                     TurnStep::Event(ev) => {
@@ -900,8 +963,23 @@ async fn event_loop<B: ratatui::backend::Backend + Send>(
                 let _ = req.reply.send(ApprovalDecision::Reject);
             }
         }
-        // Clear the awaiting_approval flag once the prompt is dismissed.
-        if pending.is_none() {
+
+        // Surface a pending filesystem-access request (only when no SQL prompt
+        // is up — the agent awaits one tool reply at a time).
+        if pending.is_none() && pending_path.is_none() {
+            if let Some(req) = app.try_recv_path_approval() {
+                let prompt = PathPrompt::new(req.path.clone(), req.action.clone());
+                app.live.awaiting_approval = true;
+                pending_path = Some((req, prompt));
+            }
+        } else if !app.is_turn_running()
+            && let Some((req, _)) = pending_path.take()
+        {
+            let _ = req.reply.send(PathGrant::Deny);
+        }
+
+        // Clear the awaiting_approval flag once both prompts are dismissed.
+        if pending.is_none() && pending_path.is_none() {
             app.live.awaiting_approval = false;
         }
     }
@@ -1218,7 +1296,7 @@ fn snapshot_app<B: ratatui::backend::Backend>(
     let empty = InputLine::new();
     let area = terminal.get_frame().area();
     terminal
-        .draw(|f| render(f, app, theme, &empty, &[], None))
+        .draw(|f| render(f, app, theme, &empty, &[], None, None))
         .map(|completed| completed.buffer.clone())
         .unwrap_or_else(|_| ratatui::buffer::Buffer::empty(area))
 }
@@ -1448,7 +1526,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from("draft input"), &[], None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from("draft input"), &[], None, None))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1467,7 +1545,7 @@ mod tests {
 
         // Fresh session: the welcome splash (tagline + wordmark glyphs) is shown.
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None, None))
             .unwrap();
         let text = buf_text(&terminal);
         assert!(text.contains("ask your database"), "welcome tagline should show on a fresh session:\n{text}");
@@ -1479,7 +1557,7 @@ mod tests {
         // Once the conversation starts, the splash is replaced by the transcript.
         app.transcript.push(TranscriptEntry::User("hi".into()));
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None, None))
             .unwrap();
         let text = buf_text(&terminal);
         assert!(!text.contains("ask your database"), "welcome must clear once the transcript is non-empty:\n{text}");
@@ -1497,7 +1575,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], Some(&prompt)))
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], Some(&prompt), None))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1536,7 +1614,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from("my query"), &[], None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from("my query"), &[], None, None))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1557,7 +1635,7 @@ mod tests {
         // tail near the cursor would show; wrapping keeps the head visible too.
         let long = format!("HEAD{}TAIL", "x".repeat(120));
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from(long.as_str()), &[], None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from(long.as_str()), &[], None, None))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1574,7 +1652,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from("first line\nsecond line"), &[], None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from("first line\nsecond line"), &[], None, None))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1592,7 +1670,7 @@ mod tests {
 
         let queued = vec!["queued one".to_string(), "queued two".to_string()];
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from("typing next"), &queued, None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from("typing next"), &queued, None, None))
             .unwrap();
 
         let text = buf_text(&terminal);
@@ -1699,7 +1777,7 @@ mod render_tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::new(true);
         terminal
-            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None))
+            .draw(|f| render(f, &app, &theme, &InputLine::from(""), &[], None, None))
             .unwrap();
 
         let text = buffer_text(&terminal);
@@ -1725,7 +1803,7 @@ mod render_tests {
         let backend = TestBackend::new(80, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render(f, &app, &Theme::new(false), &InputLine::from(""), &[], None))
+            .draw(|f| render(f, &app, &Theme::new(false), &InputLine::from(""), &[], None, None))
             .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("run_query") && text.contains("iter 3/"), "{text:?}");
@@ -1742,14 +1820,14 @@ mod render_tests {
 
         // Idle, not armed: no hint.
         terminal
-            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), &[], None))
+            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), &[], None, None))
             .unwrap();
         assert!(!buffer_text(&terminal).contains("again to exit"), "hint must not show when idle");
 
         // After a first idle Ctrl+C: the hint appears.
         app.quit_armed = true;
         terminal
-            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), &[], None))
+            .draw(|f| render(f, &app, &Theme::new(true), &InputLine::from(""), &[], None, None))
             .unwrap();
         assert!(buffer_text(&terminal).contains("again to exit"), "hint must show when quit_armed");
     }

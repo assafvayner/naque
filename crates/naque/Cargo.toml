@@ -30,13 +30,17 @@ naque-tui     = { path = "../naque-tui" }
 naque-profile = { path = "../naque-profile" }
 async-trait   = { workspace = true }
 thiserror     = { workspace = true }
-tokio         = { workspace = true }
+tokio         = { workspace = true, features = ["fs"] }
 tokio-util    = { workspace = true }
 clap          = { workspace = true }
 ratatui       = { workspace = true }
 crossterm     = { workspace = true }
 futures-util  = { workspace = true }
 anyhow        = { workspace = true }
+reqwest       = { workspace = true }
+glob          = { workspace = true }
+htmd          = { workspace = true }
+dirs          = { workspace = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }

@@ -3,14 +3,18 @@
 pub mod app;
 pub mod approval;
 pub mod executor;
+pub mod fs_access;
 pub mod live;
 pub mod turn;
 pub mod ui;
+pub mod web;
 
 pub use app::{App, AppError, TranscriptEntry};
 pub use approval::{
-    ApprovalDecision, ApprovalRequest, Approver, AutoApprove, AutoReject, ChannelApprover, ScriptedApprover,
+    ApprovalDecision, ApprovalRequest, Approver, AutoApprove, AutoReject, ChannelApprover, PathApprovalRequest,
+    PathGrant, ScriptedApprover,
 };
+pub use fs_access::{FsAccess, PathAuth};
 pub use live::LiveState;
 use naque_core::PermissionMode;
 use naque_core::gate::{GateDecision, QueryKind, gate_decision};

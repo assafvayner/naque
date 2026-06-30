@@ -79,6 +79,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "show the context doc, or append a note",
     },
     SlashCommand {
+        name: "allow-dir",
+        args: "<path-or-glob>",
+        help: "grant the agent filesystem read access to a path/glob (this session)",
+    },
+    SlashCommand {
         name: "quit",
         args: "",
         help: "exit naque",

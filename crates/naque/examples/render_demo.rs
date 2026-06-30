@@ -43,7 +43,15 @@ fn main() {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from("show me recent orders"), &[], None)
+                naque::ui::render(
+                    f,
+                    &app,
+                    &theme,
+                    &naque_tui::InputLine::from("show me recent orders"),
+                    &[],
+                    None,
+                    None,
+                )
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -58,7 +66,15 @@ fn main() {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from("show me recent orders"), &[], None)
+                naque::ui::render(
+                    f,
+                    &app,
+                    &theme,
+                    &naque_tui::InputLine::from("show me recent orders"),
+                    &[],
+                    None,
+                    None,
+                )
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -79,7 +95,7 @@ fn main() {
         );
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), &[], Some(&prompt));
+                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), &[], Some(&prompt), None);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -100,7 +116,7 @@ fn main() {
         );
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), &[], Some(&prompt));
+                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), &[], Some(&prompt), None);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -121,7 +137,7 @@ fn main() {
         );
         terminal
             .draw(|f| {
-                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), &[], Some(&prompt));
+                naque::ui::render(f, &app, &theme, &naque_tui::InputLine::from(""), &[], Some(&prompt), None);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -151,7 +167,7 @@ fn main() {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| naque::ui::render(f, &live_app, &theme, &naque_tui::InputLine::from(""), &[], None))
+            .draw(|f| naque::ui::render(f, &live_app, &theme, &naque_tui::InputLine::from(""), &[], None, None))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
 
@@ -174,7 +190,7 @@ fn main() {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| naque::ui::render(f, &live_app, &theme, &naque_tui::InputLine::from(""), &[], None))
+            .draw(|f| naque::ui::render(f, &live_app, &theme, &naque_tui::InputLine::from(""), &[], None, None))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
 

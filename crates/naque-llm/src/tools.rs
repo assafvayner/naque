@@ -123,6 +123,87 @@ pub fn standard_tools() -> Vec<ToolDef> {
                 "required": ["sql"]
             }),
         },
+        ToolDef {
+            name: "read_file".to_string(),
+            description: "Read a UTF-8 text file from the local filesystem (e.g. SQL the user wrote, schema \
+                          definitions, ORM models, or docs that explain the database). Use this to gather \
+                          context the user points you to — not to browse arbitrarily. Reads are gated by a \
+                          filesystem permission separate from the SQL permission mode: a path is allowed \
+                          only if it matches the user's configured `read_paths` globs or an in-session \
+                          grant. A path outside that set prompts the user for approval (interactive) or is \
+                          rejected (non-interactive); rejection is a normal outcome, not a failure. \
+                          Symlinks and `..` are resolved before the check, so paths cannot escape the \
+                          allowed roots. The response is a labelled envelope: the first line is `ok`, \
+                          `denied`, or `error`, and the remaining lines are the body (file contents, a \
+                          reason, or a message). Optionally request a line window with `offset`/`limit`."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file. Relative paths resolve against the project directory; '~' expands to the home directory."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-based line number to start reading from. Defaults to the start of the file.",
+                        "minimum": 1
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return from `offset`. Defaults to the whole file.",
+                        "minimum": 1
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "list_directory".to_string(),
+            description: "List filesystem entries under a directory, or the files matching a glob pattern \
+                          (e.g. 'migrations/**/*.sql'). Use this to discover what context is available \
+                          before reading specific files. Subject to the same filesystem permission as \
+                          `read_file`: only entries within the allowed `read_paths` globs (or an \
+                          in-session grant) are returned, and listing a path outside that set prompts for \
+                          approval (interactive) or is rejected (non-interactive). The response is a \
+                          labelled envelope whose first line is `ok`, `denied`, or `error`. A plain \
+                          directory path lists its immediate entries; a path containing glob metacharacters \
+                          (*, ?, [) is expanded and the matching paths are returned."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "A directory path or a glob pattern. Relative paths resolve against the project directory; '~' expands to the home directory."
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "web_fetch".to_string(),
+            description: "Fetch a single http(s) URL and return its content as text — HTML is converted to \
+                          Markdown; JSON, plain text, XML, CSV and similar are returned as-is; binary types \
+                          (images, PDFs, archives) are refused. Use it to read documentation, a GitHub file \
+                          (prefer a raw URL), or reference material the user links to. Only fetches a URL \
+                          you pass explicitly; it does not search the web. Requests to loopback, private, \
+                          or link-local hosts are blocked, and large bodies are truncated. The response is \
+                          a labelled envelope whose first line is `ok`, `disabled`, or `error`; on `ok` the \
+                          body is the fetched text. Web access can be turned off in config (`web_access`), \
+                          in which case the first line is `disabled`."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "An absolute http or https URL to fetch."
+                    }
+                },
+                "required": ["url"]
+            }),
+        },
     ]
 }
 

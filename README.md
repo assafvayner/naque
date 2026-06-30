@@ -115,7 +115,7 @@ Inside the TUI, the first character of your input routes the request:
 
 **Tool commands (`/`)** — `/help`, `/clear`, `/mode <mode>`, `/learn [--docs <path>]
 [--refresh]`, `/schema`, `/profile <list|use|new|edit|rm>`, `/config [key [value]]`,
-`/cost`, `/export <csv|json> [path]`, `/quit`.
+`/allow-dir <path-or-glob>`, `/cost`, `/export <csv|json> [path]`, `/quit`.
 
 ## Safety model
 
@@ -151,6 +151,24 @@ a hard confirm in *every* mode, including `wildcard`, unless explicitly disabled
 
 The LLM is never on the security path.
 
+### Filesystem & web access
+
+Beyond SQL, the agent can read local files and fetch web pages to gather context — point
+it at the SQL, schema, or ORM models that describe your database, or a docs URL.
+
+**Filesystem reads** (`read_file`, `list_directory`) are gated by a permission dimension
+**separate** from the SQL modes above: a path is readable only if it matches one of your
+allowed globs. Set them with `read_paths` in config (see below), or grant one for the
+current session with `/allow-dir <path-or-glob>`. When the agent reaches for a path outside
+the allowed set, the TUI prompts you — **allow once**, **allow this session**, or **deny**.
+Symlinks and `..` are resolved before the check, so reads cannot escape the allowed roots.
+
+**Web fetch** (`web_fetch`) is **enabled by default** and needs no API key — it issues a
+direct HTTP GET, converts HTML to Markdown, and returns text (binary responses are
+refused). Requests to loopback/private/link-local hosts are blocked. Turn it off with
+`web_access = false` in config. There is no web *search* tool; pass the agent a URL (or let
+it use one already in the conversation).
+
 ## Configuration
 
 `naque` layers a per-machine central store with a per-project, committable file.
@@ -177,6 +195,11 @@ project = "myapp-dev"            # active profile for this directory
 [config]
 mode = "readonly"
 row_cap = 500
+# Globs the agent may read (read_file / list_directory). Relative globs resolve
+# against this project directory; '~' expands to the home directory. Unioned
+# across config layers — global + per-profile grants accumulate.
+read_paths = ["sql/**", "migrations/**/*.sql", "~/db-notes/**"]
+web_access = true                    # web_fetch on by default; set false to disable
 
 [profiles.myapp-dev]
 engine = "postgres"
@@ -196,7 +219,10 @@ password_keyring = "myapp-prod"      # pulled from the OS keyring
 ```
 
 **Config precedence** (low → high): built-in defaults → `~/.naque/config.toml` →
-`./naque.toml` `[config]` → environment variables → CLI flags.
+`./naque.toml` `[config]` → environment variables → CLI flags. Scalar keys are
+overridden by the highest layer that sets them; `read_paths` is the exception — it is
+**unioned** across all layers (and any `/allow-dir` session grants), so a path is readable
+if any layer allows it.
 
 **Credentials** are never stored in plaintext: use `password_env` / `password_keyring`,
 the standard `DATABASE_URL` / `PG*` env vars, or an explicit `--url`.
