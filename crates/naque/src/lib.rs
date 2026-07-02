@@ -5,6 +5,7 @@ pub mod approval;
 pub mod executor;
 pub mod fs_access;
 pub mod live;
+pub mod setup;
 pub mod turn;
 pub mod ui;
 pub mod web;

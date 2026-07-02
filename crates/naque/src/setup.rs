@@ -1,15 +1,40 @@
-//! Wires CLI args → profile resolution → App + Theme.
+//! Wires a launch config → profile resolution → `App`. Shared by the TUI binary
+//! and the Tauri GUI so both frontends assemble the engine identically.
 
 use anyhow::{Context, anyhow};
-use naque::App;
 use naque_core::PermissionMode;
 use naque_db::{Database, Engine};
 use naque_llm::{Agent, AgentConfig, ClaudeProvider, GeminiProvider, HfProvider, OllamaProvider, OpenAIProvider};
-use naque_profile::{NaqueConfig, Overrides, Profile, Store, SystemSecrets};
-use naque_tui::{Logo, Theme};
+use naque_profile::{NaqueConfig, Overrides, Profile, Store, SystemSecrets, resolve_api_key};
+use naque_tui::Logo;
 
-use crate::cli::Args;
-use crate::help::NoConnection;
+use crate::App;
+
+/// Launch configuration shared by every frontend (TUI binary, Tauri GUI). It
+/// carries the connection/override knobs the CLI parses from `Args` and a GUI
+/// builds from its own launcher/picker. Serialized so a GUI can pass it across
+/// the IPC `connect` command.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LaunchConfig {
+    pub profile: Option<String>,
+    pub env: Option<String>,
+    pub url: Option<String>,
+    pub mode: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub no_guard: bool,
+}
+
+/// Errors from [`build_app`]. A missing connection surfaces as
+/// [`SetupError::NoConnection`]; the caller decides whether that is friendly
+/// first-run guidance (terminal bare launch) or a prompt to pick a profile
+/// (GUI) — the engine itself stays out of presentation.
+#[derive(Debug, thiserror::Error)]
+pub enum SetupError {
+    #[error("no database connection configured")]
+    NoConnection,
+}
 
 /// Build the engine-aware system prompt that is injected into every agent turn.
 ///
@@ -76,21 +101,24 @@ pub fn system_preamble(engine: Engine) -> String {
     )
 }
 
-/// Build an [`App`] and [`Theme`] from the parsed CLI arguments.
+/// Build an [`App`] from a [`LaunchConfig`]: open the store, resolve the
+/// profile + connection, connect the database, build the provider + agent, and
+/// wire up filesystem/web access and saved schema/context.
 ///
-/// This is async because it needs to connect to the database.
-pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
+/// This is async because it connects to the database. Theme selection is left
+/// to the caller (a TUI-only concern); the GUI ignores [`App::logo`].
+pub async fn build_app(config: &LaunchConfig) -> anyhow::Result<App> {
     // 1. Open the central store.
     let store = Store::open(Store::default_home().unwrap_or_else(|| ".naque".into()));
 
     // 2. Build CLI overrides.
     let overrides = Overrides {
-        profile: args.profile().map(str::to_string),
-        url: args.url.clone(),
+        profile: config.profile.clone(),
+        url: config.url.clone(),
         config: NaqueConfig {
-            mode: args.mode.clone(),
-            provider: args.provider.clone(),
-            model: args.model.clone(),
+            mode: config.mode.clone(),
+            provider: config.provider.clone(),
+            model: config.model.clone(),
             ..Default::default()
         },
     };
@@ -106,7 +134,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
     let mut matched_env: Option<String> = None;
     let mut active_profile_name = resolved.active_profile.clone();
     if active_profile_name.is_none()
-        && args.url.is_none()
+        && config.url.is_none()
         && let Some(db_url) = resolved.connection_url.as_deref()
         && let Some((p, e)) = naque_profile::match_profile_by_url(&store, db_url)
     {
@@ -125,7 +153,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
         && let Some(profile) = store.load_profile(&profile_name)?
     {
         dir_profile_config = profile.config.clone();
-        let env_pref = matched_env.as_deref().or(args.env.as_deref());
+        let env_pref = matched_env.as_deref().or(config.env.as_deref());
         if let Some(env) = pick_environment(&profile, env_pref) {
             let spec = profile.environments[&env].clone();
             // Matched-by-DATABASE_URL: keep DATABASE_URL as the live connection
@@ -153,7 +181,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
 
     // 4. Require a connection URL. The binary renders this into friendly guidance (bare launch) or a formatted error
     //    (see `help`).
-    let url = connection_url.ok_or_else(|| NoConnection { bare: args.is_bare() })?;
+    let url = connection_url.ok_or(SetupError::NoConnection)?;
 
     // 5. Connect to the database.
     let db = Database::connect(&url).await.context("database connection failed")?;
@@ -171,28 +199,34 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
             .map_err(|e| anyhow!("invalid permission mode {:?}: {}", s, e))?,
         None => PermissionMode::Default,
     };
-    let catastrophic_guard = !args.no_guard;
+    let catastrophic_guard = !config.no_guard;
     let row_cap = resolved.config.row_cap.or(dir_profile_config.row_cap).unwrap_or(1000) as usize;
 
-    // 7. Build provider. `config.provider` is filled by resolution either from config/profile/CLI or by env-key
-    //    auto-detection; `None` here means no provider was configured and no known API key was found.
+    // 7. Build provider. `resolved.config.provider` is filled by resolution from config/profile/CLI or by API-key
+    //    auto-detection (env var, then keyring). The key is resolved the same way — env first, then the system keyring
+    //    — so a GUI launch (no shell environment) picks up a key the user stored in the keyring via the app's settings.
+    //    Ollama needs no key.
     let provider: Box<dyn naque_llm::LlmProvider> = match resolved.config.provider.as_deref() {
         Some("openai") => {
-            let p = OpenAIProvider::from_env().map_err(|e| anyhow!("OpenAI provider error: {e}"))?;
-            Box::new(p)
+            let key = resolve_api_key("openai", &SystemSecrets)
+                .ok_or_else(|| anyhow!("OpenAI API key not found (env OPENAI_API_KEY or keyring)"))?;
+            Box::new(OpenAIProvider::new(key, None))
         },
         Some("ollama") => Box::new(OllamaProvider::new(None)),
         Some("hf") | Some("huggingface") => {
-            let p = HfProvider::from_env().map_err(|e| anyhow!("HF provider error: {e}"))?;
-            Box::new(p)
+            let key = resolve_api_key("hf", &SystemSecrets)
+                .ok_or_else(|| anyhow!("HF token not found (env HF_TOKEN or keyring)"))?;
+            Box::new(HfProvider::new(key, None))
         },
         Some("gemini") | Some("google") => {
-            let p = GeminiProvider::from_env().map_err(|e| anyhow!("Gemini provider error: {e}"))?;
-            Box::new(p)
+            let key = resolve_api_key("gemini", &SystemSecrets)
+                .ok_or_else(|| anyhow!("Gemini API key not found (env GEMINI_API_KEY/GOOGLE_API_KEY or keyring)"))?;
+            Box::new(GeminiProvider::new(key, None))
         },
         Some("claude") | Some("anthropic") => {
-            let p = ClaudeProvider::from_env().map_err(|e| anyhow!("Claude provider error: {e}"))?;
-            Box::new(p)
+            let key = resolve_api_key("claude", &SystemSecrets)
+                .ok_or_else(|| anyhow!("Anthropic API key not found (env ANTHROPIC_API_KEY or keyring)"))?;
+            Box::new(ClaudeProvider::new(key, None))
         },
         Some(other) => {
             return Err(anyhow!("unknown provider {other:?}; expected one of: claude, openai, gemini, hf, ollama"));
@@ -201,7 +235,8 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
             return Err(anyhow!(
                 "no AI provider configured and no known API key found — set one of \
                  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or HF_TOKEN, \
-                 or set `provider` in your config/profile or pass --provider"
+                 set `provider` in your config/profile, pass --provider, or (in the \
+                 GUI) add an API key in Settings"
             ));
         },
     };
@@ -239,7 +274,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let read_paths = resolved.config.read_paths.clone().unwrap_or_default();
-    app.set_fs_access(naque::FsAccess::new(fs_base, &read_paths));
+    app.set_fs_access(crate::FsAccess::new(fs_base, &read_paths));
     app.set_web_access(resolved.config.web_access_enabled());
     app.set_active_profile(store.clone(), active_profile_name.clone(), active_env, active_connection);
     if let Some(p) = &active_profile_name {
@@ -264,14 +299,7 @@ pub async fn build_app(args: &Args) -> anyhow::Result<(App, Theme)> {
         }
     }
 
-    // 13. Theme.
-    let theme = if args.no_color {
-        Theme::new(false)
-    } else {
-        Theme::detect()
-    };
-
-    Ok((app, theme))
+    Ok(app)
 }
 
 /// Pick the launch environment for a profile: --env → default_environment →
@@ -410,7 +438,7 @@ mod tests {
     // ------------------------------------------------------------------
     #[tokio::test]
     async fn live_hf_emits_byte_signal() {
-        use naque::{AutoApprove, TranscriptEntry};
+        use crate::{AutoApprove, TranscriptEntry};
 
         let (token, pg_url) = match (std::env::var("HF_TOKEN"), std::env::var("NAQUE_TEST_PG_URL")) {
             (Ok(t), Ok(u)) if !t.is_empty() && !u.is_empty() => (t, u),

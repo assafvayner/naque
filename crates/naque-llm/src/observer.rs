@@ -6,7 +6,7 @@
 use crate::Usage;
 
 /// One observable step in an agent turn, in emission order.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AgentEvent {
     /// The turn has begun (emitted once, before the first provider call).
     TurnStarted,

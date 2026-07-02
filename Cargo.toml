@@ -19,7 +19,7 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 glob = "0.3"
 htmd = "0.2"
-keyring = "3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +39,8 @@ sqlx = { version = "0.8", default-features = false, features = [
     "mac_address",
     "bit-vec",
 ] }
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
 tempfile = "3"
 thiserror = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

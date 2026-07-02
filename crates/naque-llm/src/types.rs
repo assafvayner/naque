@@ -33,7 +33,7 @@ pub struct ToolDef {
 }
 
 /// Token usage for one provider round-trip.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
