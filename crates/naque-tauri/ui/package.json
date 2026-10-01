@@ -1,0 +1,22 @@
+{
+  "name": "naque-gui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.1.0",
+    "@tsconfig/svelte": "^5.0.0",
+    "svelte": "^4.2.0",
+    "svelte-check": "^3.6.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0"
+  }
+}

@@ -2,46 +2,42 @@
 
 `naque` is a terminal (TUI) tool for querying databases through an AI agent: a user types natural language, an iterative agent translates it to SQL, inspects the schema, self-corrects, and runs it against a live Postgres/SQLite session. A four-level permission model with defense-in-depth read-only enforcement keeps execution safe by default.
 
-## Code Standards
+## Commands
 
-These rules apply to ALL code written or modified in this repo:
+- Format: `cargo +nightly fmt --all` — **nightly is required** (`rustfmt.toml` enables `unstable_features`).
+- Lint: `cargo clippy --workspace --all-targets -- -D warnings` (CI also sets `RUSTFLAGS=-D warnings`).
+- Test: `cargo test --workspace --all-targets` plus `cargo test --workspace --doc`.
+- Single integration test: `NAQUE_TEST_PG_URL=postgres://... cargo test -p naque-db --test postgres_integration`.
+- Run the binary: `cargo run -p naque -- --url postgres://user@localhost/mydb`.
+- MSRV 1.95, edition 2024.
 
-### Style
-- NO trivial comments — do not add comments that restate what the code does
-- Descriptive variable and function names
-- No wildcard imports (e.g., `use foo::*`)
-- Latest stable Rust features are allowed
+Always run `fmt` and `clippy` after changes — CI gates every PR/push on both.
 
-### Error Handling
-- Use `Result<T, E>` with explicit error handling — never panic
-- Define custom error types using `thiserror` for domain-specific errors
-- Provide helpful, actionable error messages
+## Testing quirks
 
-### Performance
-- Be mindful of allocations in hot paths
-- Prefer structured logging (tracing/log macros with fields, not string formatting)
+- LLM tests use the mock provider (`naque-llm/src/mock.rs`) — no network in unit tests.
+- Postgres integration tests (`naque-db`, `naque-schema`) read `NAQUE_TEST_PG_URL` and **skip cleanly when unset**, so the suite stays green without a Postgres container. Set the var to exercise them.
+- SQLite integration tests run against a temp-file DB; no setup needed.
 
-### Dependencies
-- Add all dependencies to `Cargo.toml`
-- Prefer well-maintained crates from crates.io
+## Workspace layout
 
-### Testing
-- Unit tests: place in the same file using `#[cfg(test)]` modules
-- Integration tests: place in the `tests/` directory
+Rust workspace under `crates/*`, each crate independently testable. Dependency direction is one-way:
 
-### Formatting and Linting
-- Format: `cargo +nightly fmt`
-- Lint: `cargo clippy -r --verbose -- -D warnings`
-- ALWAYS run both after making changes — do not skip this step
+`naque-core` (domain types, permission gate) → `naque-sql` (parse/classify via `sqlparser`) → `naque-db` (Postgres/SQLite, sessions, read-only execution) → `naque-schema` (introspection, cache, drift) → `naque-llm` (`LlmProvider` trait + OpenAI/HF/Gemini/Claude/Ollama impls, agent loop, tools) → `naque-profile` (`~/.naque/` + `naque.toml`, env/keyring creds) → `naque-tui` (ratatui widgets) → `naque` (binary: wiring, CLI, event loop).
 
-### Minimal Changes
-- Verify that every change is minimal and necessary — do not include unrelated modifications
+Binary entrypoint: `crates/naque/src/main.rs` → `cli::Args` (clap) → `setup::build_app` → `naque::ui::run`.
 
-## Repo Notes
+## Conventions
 
-- **Design doc:** [docs/superpowers/specs/2026-06-24-naque-design.md](docs/superpowers/specs/2026-06-24-naque-design.md) — read the section relevant to your change before editing.
-- **Workspace layout** (`crates/*`): `naque-core` (domain types, permission gate) → `naque-sql` (parse/classify via sqlparser) → `naque-db` (Postgres/SQLite, sessions, read-only execution) → `naque-schema` (introspection, cache, drift) → `naque-llm` (`LlmProvider` trait + OpenAI/HF/Gemini impls, agent loop, tools) → `naque-profile` (`~/.naque/` + `naque.toml`, env/keyring creds) → `naque-tui` (ratatui widgets) → `naque` (binary: wiring, CLI, event loop).
-- **Security boundary is the core invariant.** Read-only enforcement is deterministic (sqlparser classification + DB-level read-only); keep the LLM out of the security path. Every statement — agent-generated or raw `!` SQL — must pass through the single permission gate. The catastrophic guard (`DROP`, `TRUNCATE`, unqualified `DELETE`/`UPDATE`) fires in every mode, including wildcard. Anything not confidently read-only is treated as a write and gated.
+- No trivial comments — don't restate what the code does.
+- No wildcard imports (`use foo::*`).
+- Imports are grouped `StdExternalCrate` at module granularity (per `rustfmt.toml`) — match this when adding imports.
+- Errors: `Result<T, E>` with explicit handling, never `panic`. Domain errors use `thiserror`; the binary uses `anyhow`.
+- No `tracing`/`log` direct dependency — diagnostics go to stderr (`eprintln!`). Don't introduce `tracing` expecting structured logging.
+- Every change must be minimal and necessary — no unrelated modifications.
+
+## Constraints
+
+- **Security boundary is the core invariant.** Read-only enforcement is deterministic (sqlparser classification + DB-level read-only); the LLM is never in the security path. Every statement — agent-generated or raw `!` SQL — passes through the single permission gate. The catastrophic guard (`DROP`, `TRUNCATE`, unqualified `DELETE`/`UPDATE`) fires in every mode, including `wildcard`. Anything not confidently read-only is treated as a write and gated.
 - **Dependencies are workspace-level.** Declare external crates in the root `Cargo.toml` `[workspace.dependencies]`; member crates inherit them with `{ workspace = true }`.
 - **Secrets never touch disk.** `naque.toml` is committed and shared — passwords are referenced via `password_env` / `password_keyring` only, never written in plaintext.
-- **LLM tests use the mock provider** (`naque-llm/src/mock.rs`) — no network in unit tests.

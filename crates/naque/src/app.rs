@@ -48,14 +48,14 @@ impl From<naque_schema::SchemaError> for AppError {
 // Transcript
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StepStatus {
     Running,
     Ok,
     Err,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptEntry {
     User(String),
     Agent(String),
@@ -564,6 +564,27 @@ impl App {
         self.schema.as_ref()
     }
 
+    /// The active profile name shown by frontends in their status area.
+    pub fn profile_name(&self) -> &str {
+        &self.profile_name
+    }
+
+    /// The agent iteration cap for this session (for `iter N/M` indicators).
+    pub fn max_iterations(&self) -> u32 {
+        self.max_iterations
+    }
+
+    /// The current agent iteration of an in-flight turn (0 when idle).
+    pub fn iteration(&self) -> u32 {
+        self.live.iteration
+    }
+
+    /// The active database engine. Frontends use it for dialect-aware
+    /// rendering; locks the shared connection only for the duration of the read.
+    pub async fn engine(&self) -> Engine {
+        self.db.lock().await.engine()
+    }
+
     /// Whether a raw SQL statement would be auto-approved by the gate in the
     /// current mode (so it can run inline without a prompt).
     pub async fn raw_sql_auto_approves(&self, sql: &str) -> bool {
@@ -618,14 +639,14 @@ impl App {
         self.active_context = Some(doc);
     }
 
-    pub(crate) fn list_profiles(&self) -> Result<Vec<String>, AppError> {
+    pub fn list_profiles(&self) -> Result<Vec<String>, AppError> {
         match &self.store {
             Some(s) => s.list_profiles().map_err(|e| AppError::Other(e.to_string())),
             None => Ok(Vec::new()),
         }
     }
 
-    pub(crate) fn list_environments(&self, profile: &str) -> Result<Vec<String>, AppError> {
+    pub fn list_environments(&self, profile: &str) -> Result<Vec<String>, AppError> {
         let Some(store) = &self.store else {
             return Ok(Vec::new());
         };

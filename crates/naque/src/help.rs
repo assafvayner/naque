@@ -5,30 +5,10 @@
 //! widgets. Color is opt-in via [`color_enabled`] so we honor `--no-color`,
 //! the `NO_COLOR` convention, and non-tty output.
 
-use std::fmt;
-
 const RESET: &str = "\x1b[0m";
 const BOLD_RED: &str = "\x1b[1;31m";
 const BOLD_CYAN: &str = "\x1b[1;36m";
 const BOLD_GREEN: &str = "\x1b[1;32m";
-
-/// Error signalling that no database connection could be resolved.
-///
-/// `bare` is true when the user launched `naque` without any
-/// connection-related arguments. In that case the binary shows friendly
-/// getting-started guidance and exits 0 instead of treating it as an error.
-#[derive(Debug)]
-pub struct NoConnection {
-    pub bare: bool,
-}
-
-impl fmt::Display for NoConnection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("no database connection configured")
-    }
-}
-
-impl std::error::Error for NoConnection {}
 
 /// Decide whether ANSI styling should be emitted.
 ///

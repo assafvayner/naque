@@ -8,7 +8,7 @@ use crate::discovery::find_naque_toml;
 use crate::error::ConfigError;
 use crate::file::NaqueFile;
 use crate::profile::{ConnectionSpec, ProfileBody, ProfileEngine};
-use crate::secrets::Secrets;
+use crate::secrets::{Secrets, provider_env_vars, provider_keyring_account};
 use crate::store::Store;
 
 /// CLI / caller overrides that win over everything else.
@@ -279,23 +279,31 @@ impl ConnectionSpec {
     }
 }
 
-/// Detect which AI provider to use from common API-key environment variables.
+/// Detect which AI provider to use. Environment variables are scanned first (in
+/// priority order, unchanged from the env-only behavior), then the system
+/// keyring. This keeps the TUI/shell path behaving exactly as before — a key
+/// stored in the keyring via the GUI only wins when no provider's env var is
+/// set (i.e. a GUI launch, which has no shell environment).
 ///
 /// Priority (first present wins): Anthropic → OpenAI → Gemini → Hugging Face
 /// Inference Providers. Returns the provider identifier string used by the
 /// `naque` binary's provider switch, or `None` if no known key is set.
 pub fn detect_provider(secrets: &dyn Secrets) -> Option<String> {
-    if secrets.env("ANTHROPIC_API_KEY").is_some() {
-        Some("claude".to_string())
-    } else if secrets.env("OPENAI_API_KEY").is_some() {
-        Some("openai".to_string())
-    } else if secrets.env("GEMINI_API_KEY").is_some() || secrets.env("GOOGLE_API_KEY").is_some() {
-        Some("gemini".to_string())
-    } else if secrets.env("HF_TOKEN").is_some() {
-        Some("hf".to_string())
-    } else {
-        None
+    for provider in ["claude", "openai", "gemini", "hf"] {
+        for var in provider_env_vars(provider) {
+            if secrets.env(var).is_some() {
+                return Some(provider.to_string());
+            }
+        }
     }
+    for provider in ["claude", "openai", "gemini", "hf"] {
+        if let Some(account) = provider_keyring_account(provider)
+            && secrets.keyring(account).is_some()
+        {
+            return Some(provider.to_string());
+        }
+    }
+    None
 }
 
 /// Replace `${VAR}` patterns in `s` using `secrets.env`.
@@ -332,6 +340,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::secrets::resolve_api_key;
 
     // -------------------------------------------------------------------------
     // Fake Secrets implementation backed by a HashMap
@@ -906,6 +915,45 @@ mode = "readonly"
         // Nothing set → None.
         let s = FakeSecrets::new();
         assert_eq!(detect_provider(&s), None);
+    }
+
+    // =========================================================================
+    // Test 16b: detection falls back to the keyring when no env var is set
+    // (GUI launches have no shell environment, so the keyring is the source)
+    // =========================================================================
+    #[test]
+    fn detect_provider_falls_back_to_keyring() {
+        // Keyring-only Anthropic key is detected.
+        let s = FakeSecrets::new().with_keyring("anthropic-api-key", "a");
+        assert_eq!(detect_provider(&s).as_deref(), Some("claude"));
+
+        // Keyring-only OpenAI key.
+        let s = FakeSecrets::new().with_keyring("openai-api-key", "o");
+        assert_eq!(detect_provider(&s).as_deref(), Some("openai"));
+
+        // Keyring-only Gemini key.
+        let s = FakeSecrets::new().with_keyring("gemini-api-key", "g");
+        assert_eq!(detect_provider(&s).as_deref(), Some("gemini"));
+
+        // Keyring-only HF token.
+        let s = FakeSecrets::new().with_keyring("hf-token", "h");
+        assert_eq!(detect_provider(&s).as_deref(), Some("hf"));
+
+        // Env var wins over a keyring key for the same provider: when OpenAI's
+        // env var and keyring entry are both present, resolve_api_key returns
+        // the env value (so the TUI/shell path keeps precedence).
+        let s = FakeSecrets::new()
+            .with_env("OPENAI_API_KEY", "env-o")
+            .with_keyring("openai-api-key", "kr-o");
+        assert_eq!(resolve_api_key("openai", &s).as_deref(), Some("env-o"));
+
+        // Env wins globally over keyring across providers too: an OpenAI env
+        // var beats an Anthropic keyring key (env is scanned first, preserving
+        // the TUI's shell-intent behavior).
+        let s = FakeSecrets::new()
+            .with_env("OPENAI_API_KEY", "env-o")
+            .with_keyring("anthropic-api-key", "kr-a");
+        assert_eq!(detect_provider(&s).as_deref(), Some("openai"));
     }
 
     // =========================================================================

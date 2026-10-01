@@ -32,5 +32,7 @@ pub use file::NaqueFile;
 pub use profile::{ConnId, ConnectionSpec, ProfileBody, ProfileEngine, url_conn_id};
 pub use profile_store::{Profile, match_profile_by_url};
 pub use resolve::{Overrides, Resolved, detect_provider, resolve};
-pub use secrets::{Secrets, SystemSecrets};
+pub use secrets::{
+    Secrets, SystemSecrets, clear_api_key, provider_env_vars, provider_keyring_account, resolve_api_key, set_api_key,
+};
 pub use store::Store;
